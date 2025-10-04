@@ -1,86 +1,39 @@
-import { AppServer, AppSession, ViewType } from "@mentra/sdk";
+import { AppServer, AppSession } from "@mentra/sdk";
 import * as fs from "fs";
 import * as path from "path";
 
-// ---------- App constants ----------
-const PACKAGE_NAME = process.env.PACKAGE_NAME || "org.movenanter.rsc";
-const PORT = parseInt(process.env.PORT || "3000", 10);
+// ---------------- App constants ----------------
+const PACKAGE_NAME = process.env.PACKAGE_NAME || "org.movenanter.rescue";
+const PORT = Number(process.env.PORT || 3000);
 const MENTRAOS_API_KEY = process.env.MENTRAOS_API_KEY;
 if (!MENTRAOS_API_KEY) {
   console.error("MENTRAOS_API_KEY environment variable is required");
   process.exit(1);
 }
 
-// Wake phrases (kept for future use if you want intent words centralized)
-const WAKE_PHRASE = "start rescue";
-const EMERGENCY_CONFIRMED_PHRASE = "emergency called";
-const SAFETY_OK_PHRASE = "yes good";
-const SAFETY_NOT_OK_PHRASE = "not good";
-const RESPONSIVE_YES_PHRASE = "yes responding";
-const RESPONSIVE_NO_PHRASE = "no response";
-
-type HandPlacement = "good" | "high" | "low" | "left" | "right" | "uncertain";
+// ---------------- Types ----------------
+type BPM = 100 | 110 | 120;
 type AppState = "welcome" | "safety_check" | "responsiveness_check" | "compressions" | "settings";
+type HandPlacement = "good" | "high" | "low" | "left" | "right" | "uncertain";
 
 interface HandPlacementResult {
   position: HandPlacement;
   confidence: number; // 0..1
 }
 
-// Settings keys (Mentra Developer Console -> App Settings)
-const SETTING_SAVE_FOR_QA = "save_for_qa"; // boolean
-const SETTING_METRONOME_BPM = "metronome_bpm"; // select: 100 | 110 | 120
-
-// ---------- Local photo storage ----------
-class LocalPhotoStorage {
-  private photosDir: string;
-
-  constructor() {
-    this.photosDir = path.join(process.cwd(), "hands-position");
-    if (!fs.existsSync(this.photosDir)) {
-      fs.mkdirSync(this.photosDir, { recursive: true });
-      console.log(`Created photos directory: ${this.photosDir}`);
-    }
-  }
-
-  async savePhotoBuffer(buffer: Buffer): Promise<{ success: boolean; filePath?: string }> {
-    try {
-      const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-      const filePath = path.join(this.photosDir, `hand-position-${timestamp}.jpg`);
-      fs.writeFileSync(filePath, buffer);
-      console.log(`Photo saved locally: ${filePath}`);
-      return { success: true, filePath };
-    } catch (error) {
-      console.error("Failed to save photo locally:", error);
-      return { success: false };
-    }
-  }
-
-  // Mock analysis
-  async analyzeHandPlacement(_: Buffer): Promise<HandPlacementResult> {
-    await new Promise((r) => setTimeout(r, 300));
-    const positions: HandPlacement[] = ["good", "high", "low", "left", "right", "uncertain"];
-    const position = positions[Math.floor(Math.random() * positions.length)];
-    const confidence = Math.round((Math.random() * 0.4 + 0.6) * 100) / 100;
-    return { position, confidence };
-  }
-}
-
-// ---------- Per-session context ----------
 interface RescueSessionState {
   currentState: AppState;
-  emergencyConfirmed: boolean;
   compressionCount: number;
+  emergencyConfirmed: boolean;
   sessionStartTime: number;
   lastHandCheckTime: number;
 
-  // Mentra settings
-  metronomeBPM: 100 | 110 | 120;
+  metronomeBPM: BPM;
   saveForQA: boolean;
 
-  // Audio helpers
-  speechGuardUntil?: number;            // while Date.now() < this, skip ticks
-  metronomeInterval?: NodeJS.Timeout;   // active metronome timer
+  // runtime helpers
+  speechGuardUntil?: number;          // while Date.now() < this, pause ticks
+  metronomeTimer?: NodeJS.Timeout;    // interval id
 }
 
 interface SessionContext {
@@ -88,16 +41,29 @@ interface SessionContext {
   unsubscribes: Array<() => void>;
   ttsQueue: string[];
   ttsPlaying: boolean;
-
-  // camera serialization
   cameraBusy?: boolean;
 }
 
+// Settings keys (add these in Developer Console if you want)
+const SETTING_SAVE_FOR_QA = "save_for_qa";     // boolean
+const SETTING_METRONOME_BPM = "metronome_bpm"; // 100 | 110 | 120
+
+// ---------------- Utilities ----------------
+const RE_TRUE = /^(true|1|yes)$/i;
+const RE_CHECK_HANDS =
+  /\b(check|scan|verify|assess|inspect|review)\b.*\bhand(s)?\b|\bhand(s)?\b.*\b(check|scan|verify|assess|inspect|review)\b|hand\s*check|check\s*position|hand\s*position/;
+
+function isFinalFlag(v: unknown): boolean {
+  return v === true || (typeof v === "string" && RE_TRUE.test(v));
+}
+function normalize(s: string) {
+  return (s || "").toLowerCase().trim();
+}
 function createInitialState(): RescueSessionState {
   return {
     currentState: "welcome",
-    emergencyConfirmed: false,
     compressionCount: 0,
+    emergencyConfirmed: false,
     sessionStartTime: Date.now(),
     lastHandCheckTime: 0,
     metronomeBPM: 110,
@@ -105,13 +71,35 @@ function createInitialState(): RescueSessionState {
   };
 }
 
-function normalize(text: string) {
-  return text.toLowerCase().trim();
+// ---------------- Mock hand analyzer & local storage ----------------
+class LocalPhotoStorage {
+  private dir: string;
+  constructor() {
+    this.dir = path.join(process.cwd(), "hands-position");
+    if (!fs.existsSync(this.dir)) fs.mkdirSync(this.dir, { recursive: true });
+  }
+  async save(buffer: Buffer): Promise<{ success: boolean; filePath?: string }> {
+    try {
+      const ts = new Date().toISOString().replace(/[:.]/g, "-");
+      const filePath = path.join(this.dir, `hand-position-${ts}.jpg`);
+      fs.writeFileSync(filePath, buffer);
+      return { success: true, filePath };
+    } catch {
+      return { success: false };
+    }
+  }
+  async analyze(_: Buffer): Promise<HandPlacementResult> {
+    await new Promise((r) => setTimeout(r, 300));
+    const pick = <T,>(arr: T[]) => arr[Math.floor(Math.random() * arr.length)];
+    const position = pick<HandPlacement>(["good", "high", "low", "left", "right", "uncertain"]);
+    const confidence = Math.round((Math.random() * 0.4 + 0.6) * 100) / 100;
+    return { position, confidence };
+  }
 }
-
 const photoStorage = new LocalPhotoStorage();
 
-export class Rescue extends AppServer {
+// ---------------- App ----------------
+class RescueApp extends AppServer {
   private contexts = new Map<string, SessionContext>();
 
   constructor() {
@@ -122,24 +110,23 @@ export class Rescue extends AppServer {
     });
   }
 
-  // ---------- Helpers ----------
-  private ctx(sessionId: string): SessionContext {
+  // ---- context helpers
+  private ctx(sessionId: string) {
     const ctx = this.contexts.get(sessionId);
     if (!ctx) throw new Error("No session context");
     return ctx;
   }
-
   private addSub(sessionId: string, unsub: () => void) {
     this.ctx(sessionId).unsubscribes.push(unsub);
     this.addCleanupHandler(unsub);
   }
 
-  private async queueTTS(session: AppSession, sessionId: string, message: string) {
+  // ---- TTS queue so lines never collide
+  private async queueTTS(session: AppSession, sessionId: string, msg: string) {
     const ctx = this.ctx(sessionId);
-    ctx.ttsQueue.push(message);
+    ctx.ttsQueue.push(msg);
     if (!ctx.ttsPlaying) await this.playNextTTS(session, sessionId);
   }
-
   private async playNextTTS(session: AppSession, sessionId: string): Promise<void> {
     const ctx = this.ctx(sessionId);
     if (ctx.ttsQueue.length === 0) {
@@ -149,101 +136,132 @@ export class Rescue extends AppServer {
     ctx.ttsPlaying = true;
     const msg = ctx.ttsQueue.shift()!;
     try {
-      // Guard: estimate ~2.2s of speech time for short lines
+      // Guard ticks for ~2.2s while we speak short lines
       ctx.state.speechGuardUntil = Date.now() + 2200;
-
       const res = await session.audio.speak(msg, { voice_settings: { speed: 1 } });
-      if (!res.success) session.logger.error("Failed to speak message");
+      if (!res.success) session.logger.error("TTS failed");
     } catch (e) {
-      session.logger.error("Audio error: " + String(e));
+      session.logger.error("TTS exception: " + String(e));
     }
     setTimeout(() => this.playNextTTS(session, sessionId), 300);
   }
-
   private async stopAllAudio(session: AppSession) {
-    try {
-      await session.audio.stopAudio();
-    } catch (e) {
-      session.logger.error("stopAudio error: " + String(e));
-    }
+    try { await session.audio.stopAudio(); } catch {}
   }
 
-  private setDashboardStatus(session: AppSession, text: string) {
-    if (session.capabilities?.hasDisplay) {
-      session.dashboard.content.writeToMain(`Rescue: ${text}`);
-    }
-  }
-
-  private showOverlay(session: AppSession, text: string, ms = 3500) {
-    if (session.capabilities?.hasDisplay) {
-      session.layouts.showTextWall(text, { view: ViewType.MAIN, durationMs: ms });
-    }
-  }
-
-  // ---------- Metronome ----------
+  // ---- Metronome via audioUrl (audio-only)
   private startMetronome(session: AppSession, sessionId: string) {
     const ctx = this.ctx(sessionId);
-    const intervalMs = Math.round(60000 / ctx.state.metronomeBPM);
+    const period = Math.round(60000 / ctx.state.metronomeBPM);
 
-    this.stopMetronome(sessionId); // clear any previous timer first
-    session.logger.info(`Starting metronome @ ${ctx.state.metronomeBPM} BPM`);
+    this.stopMetronome(sessionId);
+    session.logger.info(`Metronome start @ ${ctx.state.metronomeBPM} BPM`);
 
-    ctx.state.metronomeInterval = setInterval(async () => {
-      // Skip ticks if TTS is currently speaking
+    ctx.state.metronomeTimer = setInterval(async () => {
       if (ctx.state.speechGuardUntil && Date.now() < ctx.state.speechGuardUntil) return;
 
-      ctx.state.compressionCount += 1;
+      ctx.state.compressionCount++;
 
       try {
         const result = await session.audio.playAudio({
-          audioUrl: "https://cdn.pixabay.com/audio/2022/03/15/audio_b7a6b7dfc2.mp3", // tick sound
+          // Short public tick
+          audioUrl: "https://cdn.pixabay.com/audio/2022/03/15/audio_b7a6b7dfc2.mp3",
           volume: 0.5, // 0.0–1.0
         });
-        if (!result.success && result.error) {
-          session.logger.error(`Metronome play error: ${result.error}`);
-        }
+        if (!result.success && result.error) session.logger.error(`Tick error: ${result.error}`);
       } catch (e) {
-        session.logger.error("Metronome exception: " + String(e));
+        session.logger.error("Tick exception: " + String(e));
       }
 
-      // Every 10 compressions: speak the count
       if (ctx.state.compressionCount % 10 === 0) {
-        ctx.state.speechGuardUntil = Date.now() + 1200; // avoid immediate overlap
+        ctx.state.speechGuardUntil = Date.now() + 1100;
         this.queueTTS(session, sessionId, String(ctx.state.compressionCount));
-        this.setDashboardStatus(session, `${ctx.state.compressionCount} @ ${ctx.state.metronomeBPM} BPM`);
       }
-
-      // About every 2 minutes at ~110 BPM: reassess reminder
       if (ctx.state.compressionCount % 220 === 0) {
         ctx.state.speechGuardUntil = Date.now() + 2200;
         this.queueTTS(session, sessionId, "Two minutes completed. Consider reassessing or swapping rescuers.");
       }
-    }, intervalMs);
+    }, period);
   }
-
   private stopMetronome(sessionId: string) {
     const ctx = this.ctx(sessionId);
-    if (ctx.state.metronomeInterval) {
-      clearInterval(ctx.state.metronomeInterval);
-      ctx.state.metronomeInterval = undefined;
+    if (ctx.state.metronomeTimer) {
+      clearInterval(ctx.state.metronomeTimer);
+      ctx.state.metronomeTimer = undefined;
     }
   }
 
-  // ---------- Camera (per docs: only `size` is supported) ----------
-  private async ensureCameraPermission(session: AppSession) {
+  // ---- Camera helpers (per docs)
+  private guidanceText(result: HandPlacementResult) {
+    const map: Record<HandPlacement, string> = {
+      good: "Centered, keep going.",
+      high: "Hands slightly high, move lower.",
+      low: "Hands slightly low, move higher.",
+      left: "Hands slightly left, move right.",
+      right: "Hands slightly right, move left.",
+      uncertain: "Hand position unclear, continue and try again.",
+    };
+    return map[result.position];
+  }
+
+  private async captureAndAnalyzeHands(session: AppSession, sessionId: string) {
+    const ctx = this.ctx(sessionId);
+
+    if (!session.capabilities?.hasCamera) {
+      await this.queueTTS(session, sessionId, "This device has no camera. Continue compressions.");
+      return;
+    }
+    if (ctx.cameraBusy) {
+      await this.queueTTS(session, sessionId, "Still processing the last photo. Try again in a moment.");
+      return;
+    }
+
+    ctx.cameraBusy = true;
     try {
-      // Optional: safe no-op if ensure() is not exposed
+      // Optional: ensure CAMERA permission if your build uses permissions manager
       // @ts-ignore
       if (session.permissions?.ensure) {
         // @ts-ignore
         await session.permissions.ensure("CAMERA");
       }
-    } catch (e) {
-      session.logger.warn("CAMERA permission ensure failed (may not be required on this device): " + String(e));
+
+      ctx.state.speechGuardUntil = Date.now() + 900;
+      await session.audio.speak("Capturing photo to check hand position.");
+
+      // Per docs: requestPhoto({ size }) returns PhotoData with buffer + metadata
+      let photo = await session.camera.requestPhoto({ size: "small" }); // faster
+      if (!photo?.buffer) {
+        // brief backoff → default (medium)
+        await new Promise((r) => setTimeout(r, 350));
+        photo = await session.camera.requestPhoto();
+      }
+      if (!photo?.buffer) throw new Error("NO_PHOTO_BUFFER");
+
+      ctx.state.lastHandCheckTime = Date.now();
+      session.logger.info(
+        `Photo OK: ${photo.filename} ${photo.mimeType} ${photo.size}B (id=${photo.requestId})`
+      );
+
+      const result = await photoStorage.analyze(photo.buffer as Buffer);
+      const guidance = this.guidanceText(result);
+
+      await session.audio.speak(guidance);
+
+      if (ctx.state.saveForQA) {
+        const saved = await photoStorage.save(photo.buffer as Buffer);
+        if (!saved.success) session.logger.error("Save photo failed");
+      }
+    } catch (e: any) {
+      const code = e?.code || e?.name || "UNKNOWN_ERROR";
+      const msg = e?.message || String(e);
+      session.logger.error(`Photo failed: code=${code} msg=${msg}`);
+      await session.audio.speak("Unable to check hand position right now. Continue compressions and try again.");
+    } finally {
+      ctx.cameraBusy = false;
     }
   }
 
-  // ---------- Flow handlers ----------
+  // ---- Flow
   private async enterWelcome(session: AppSession, sessionId: string) {
     const ctx = this.ctx(sessionId);
     ctx.state.currentState = "welcome";
@@ -251,37 +269,32 @@ export class Rescue extends AppServer {
     if (!session.capabilities?.speaker?.isPrivate) {
       session.logger.warn("Audio may route through phone (no private speaker).");
     }
-    this.showOverlay(session, "Rescue ready. Say “start rescue”.");
     await this.queueTTS(session, sessionId, "Rescue CPR app ready. Say 'start rescue' to begin.");
-
-    const unsubVad = session.events.onVoiceActivity((_data) => { /* no-op */ });
-    this.addSub(sessionId, unsubVad);
   }
 
   private async enterSafetyCheck(session: AppSession, sessionId: string) {
     const ctx = this.ctx(sessionId);
     ctx.state.currentState = "safety_check";
-    this.showOverlay(session, "Check scene safety. Say “yes good” or “not good”.", 6000);
     await this.queueTTS(
       session,
       sessionId,
-      "Ensure the scene is safe: traffic, fire, electrical hazards. Say 'yes good' if safe, or 'not good' if hazards."
+      "Ensure the scene is safe: traffic, fire, and electrical hazards. Say 'yes good' if safe, or 'not good' if hazards."
     );
   }
 
-  private async enterEmergencyCallWait(session: AppSession, sessionId: string) {
+  private async enterEmergencyWait(session: AppSession, sessionId: string) {
     const ctx = this.ctx(sessionId);
     ctx.state.emergencyConfirmed = false;
     await this.queueTTS(
       session,
       sessionId,
-      "Emergency! Call 911 immediately. Say 'emergency called' when you have called for help."
+      "Emergency! Call 911 now. Say 'emergency called' when you have called for help."
     );
-    this.showOverlay(session, "Call emergency. Then say “emergency called”.", 6000);
 
     setTimeout(() => {
-      if (!this.ctx(sessionId).state.emergencyConfirmed) {
-        this.queueTTS(session, sessionId, "Please confirm you have called emergency services by saying 'emergency called'.");
+      const s = this.ctx(sessionId).state;
+      if (!s.emergencyConfirmed) {
+        this.queueTTS(session, sessionId, "Please confirm you have called emergency services.");
       }
     }, 10000);
   }
@@ -289,7 +302,6 @@ export class Rescue extends AppServer {
   private async enterResponsivenessCheck(session: AppSession, sessionId: string) {
     const ctx = this.ctx(sessionId);
     ctx.state.currentState = "responsiveness_check";
-    this.showOverlay(session, "Tap + shout: “Are you okay?” Then say “yes responding” or “no response”.", 7000);
     await this.queueTTS(
       session,
       sessionId,
@@ -301,19 +313,12 @@ export class Rescue extends AppServer {
     const ctx = this.ctx(sessionId);
     ctx.state.currentState = "compressions";
 
-    // Speak first, then start metronome
-    ctx.state.speechGuardUntil = Date.now() + 2400; // protect initial line
+    // Speak first, then tick—so the first beat is audible
+    ctx.state.speechGuardUntil = Date.now() + 2200;
     await session.audio.speak(
-      `Starting compressions at ${ctx.state.metronomeBPM} beats per minute. Say 'check hands', 'change speed', or 'settings'.`,
-      { voice_settings: { speed: 1 } }
+      `Starting compressions at ${ctx.state.metronomeBPM} beats per minute. Say 'check hands', 'change speed', or 'settings'.`
     );
-
-    setTimeout(() => this.startMetronome(session, sessionId), 400);
-
-    this.showOverlay(
-      session,
-      `Compressions @ ${ctx.state.metronomeBPM} BPM\nSay "check hands", "change speed", or "settings"`
-    );
+    setTimeout(() => this.startMetronome(session, sessionId), 450);
   }
 
   private async enterSettings(session: AppSession, sessionId: string) {
@@ -323,20 +328,21 @@ export class Rescue extends AppServer {
     await this.queueTTS(
       session,
       sessionId,
-      `Settings. Photo saving is ${saveTxt}. Say 'toggle photos' to change, or 'back to compressions' to return.`
+      `Settings. Photo saving is ${saveTxt}. Say 'toggle photos' or 'back to compressions'.`
     );
-    this.showOverlay(session, `Settings\nPhoto saving: ${saveTxt}\nSay “toggle photos” or “back to compressions”`);
   }
 
-  // ---------- Intent router ----------
+  // ---- Transcription router (robust + global “check hands”)
   private installTranscriptionRouter(session: AppSession, sessionId: string) {
     const unsub = session.events.onTranscription(async (data) => {
-      const text = normalize(data.text);
-      if (!data.isFinal) return;
+      const text = normalize(data?.text || "");
+      const final = isFinalFlag(data?.isFinal);
+      if (!final) return;
 
       const ctx = this.ctx(sessionId);
+      session.logger.info(`ASR: state=${ctx.state.currentState} text="${text}"`);
 
-      // Global restart
+      // Global: restart flow
       if (text.includes("start") && text.includes("rescue")) {
         await this.stopAllAudio(session);
         this.stopMetronome(sessionId);
@@ -349,6 +355,27 @@ export class Rescue extends AppServer {
         return;
       }
 
+      // Global: emergency confirm
+      if (text.includes("emergency") && text.includes("called")) {
+        ctx.state.emergencyConfirmed = true;
+        await this.queueTTS(session, sessionId, "Emergency services called. Now check if the person is responsive.");
+        setTimeout(() => this.enterResponsivenessCheck(session, sessionId), 1200);
+        return;
+      }
+
+      // Global: check hands (works in any state; accepts variants)
+      if (RE_CHECK_HANDS.test(text)) {
+        if (ctx.state.currentState !== "compressions") {
+          await this.queueTTS(session, sessionId, "Starting compressions, then I’ll check hand position.");
+          await this.enterCompressions(session, sessionId);
+          setTimeout(() => this.captureAndAnalyzeHands(session, sessionId), 300);
+        } else {
+          await this.captureAndAnalyzeHands(session, sessionId);
+        }
+        return;
+      }
+
+      // State-specific intents
       switch (ctx.state.currentState) {
         case "welcome": {
           if (text.includes("start") && text.includes("rescue")) {
@@ -361,7 +388,7 @@ export class Rescue extends AppServer {
             await this.queueTTS(session, sessionId, "Scene is safe. Proceeding to check responsiveness.");
             setTimeout(() => this.enterResponsivenessCheck(session, sessionId), 1000);
           } else if (text.includes("not") && text.includes("good")) {
-            await this.enterEmergencyCallWait(session, sessionId);
+            await this.enterEmergencyWait(session, sessionId);
           }
           break;
         }
@@ -376,9 +403,7 @@ export class Rescue extends AppServer {
           break;
         }
         case "compressions": {
-          if (text.includes("check") && text.includes("hands")) {
-            await this.captureAndAnalyzeHands(session, sessionId);
-          } else if (text.includes("change") && text.includes("speed")) {
+          if (text.includes("change") && text.includes("speed")) {
             await this.cycleBPM(session, sessionId);
           } else if (text.includes("settings")) {
             await this.enterSettings(session, sessionId);
@@ -396,99 +421,25 @@ export class Rescue extends AppServer {
           break;
         }
       }
-
-      // handle emergency confirmation anytime
-      if (text.includes("emergency") && text.includes("called")) {
-        ctx.state.emergencyConfirmed = true;
-        await this.queueTTS(session, sessionId, "Emergency services called. Now check if the person is responsive.");
-        setTimeout(() => this.enterResponsivenessCheck(session, sessionId), 1500);
-      }
     });
 
     this.addSub(sessionId, unsub);
   }
 
-  // ---------- Camera & analysis (docs-compliant) ----------
-  private getGuidanceMessage(result: HandPlacementResult) {
-    const m: Record<HandPlacement, string> = {
-      good: "Centered, keep going.",
-      high: "Hands slightly high, move lower.",
-      low: "Hands slightly low, move higher.",
-      left: "Hands slightly left, move right.",
-      right: "Hands slightly right, move left.",
-      uncertain: "Hand position unclear, continue and try again."
-    };
-    return m[result.position];
-  }
-
-  private async captureAndAnalyzeHands(session: AppSession, sessionId: string) {
-    const ctx = this.ctx(sessionId);
-
-    if (!session.capabilities?.hasCamera) {
-      await this.queueTTS(session, sessionId, "This device has no camera. Continue compressions.");
-      return;
-    }
-    if (ctx.cameraBusy) {
-      await this.queueTTS(session, sessionId, "Still processing the last photo. Try again in a moment.");
-      return;
-    }
-
-    ctx.cameraBusy = true;
-    try {
-      await this.ensureCameraPermission(session);
-
-      // Brief guard then announce
-      ctx.state.speechGuardUntil = Date.now() + 1000;
-      await session.audio.speak("Capturing photo to check hand position.");
-
-      // Per docs: only `size` is supported. Try small → fallback to default.
-      let photo = await session.camera.requestPhoto({ size: "medium" });
-      if (!photo?.buffer) {
-        session.logger.warn("requestPhoto({size:'medium'}) returned no buffer; retrying with default.");
-        photo = await session.camera.requestPhoto();
-      }
-
-      if (!photo?.buffer) throw new Error("NO_PHOTO_BUFFER");
-
-      ctx.state.lastHandCheckTime = Date.now();
-      session.logger.info(
-        `Photo captured: ${photo.filename ?? "(no name)"}; bytes=${photo.size}; type=${photo.mimeType}`
-      );
-
-      const result = await photoStorage.analyzeHandPlacement(photo.buffer as Buffer);
-      const guidance = this.getGuidanceMessage(result);
-
-      await session.audio.speak(guidance);
-      this.showOverlay(session, `Hands: ${result.position} (${Math.round(result.confidence * 100)}%)`);
-
-      if (ctx.state.saveForQA) {
-        const saved = await photoStorage.savePhotoBuffer(photo.buffer as Buffer);
-        if (!saved.success) session.logger.error("Failed to save photo locally");
-      }
-    } catch (e: any) {
-      session.logger.error("Photo capture/analysis failed:", e);
-      await session.audio.speak("Unable to check hand position right now. Continue compressions and try again.");
-    } finally {
-      ctx.cameraBusy = false;
-    }
-  }
-
-  // ---------- Settings / BPM ----------
+  // ---- Settings / BPM
   private async cycleBPM(session: AppSession, sessionId: string) {
     const ctx = this.ctx(sessionId);
-    const options: Array<100 | 110 | 120> = [100, 110, 120];
+    const options: BPM[] = [100, 110, 120];
     const idx = options.indexOf(ctx.state.metronomeBPM);
     ctx.state.metronomeBPM = options[(idx + 1) % options.length];
 
     this.stopMetronome(sessionId);
     await this.stopAllAudio(session);
     this.startMetronome(session, sessionId);
-
     await session.audio.speak(`Metronome changed to ${ctx.state.metronomeBPM} beats per minute.`);
-    this.showOverlay(session, `BPM: ${ctx.state.metronomeBPM}`);
   }
 
-  // ---------- Lifecycle ----------
+  // ---- Lifecycle
   protected async onSession(session: AppSession, sessionId: string, userId: string): Promise<void> {
     session.logger.info(`Rescue CPR session started: ${sessionId} for user ${userId}`);
 
@@ -499,22 +450,22 @@ export class Rescue extends AppServer {
       ttsPlaying: false,
     });
 
-    // Capability preflight
+    // Audio-only capabilities note
     session.logger.info(
-      `Capabilities: camera=${String(session.capabilities?.hasCamera)} speakerPrivate=${String(session.capabilities?.speaker?.isPrivate)}`
+      `Capabilities: camera=${String(session.capabilities?.hasCamera)} privateSpeaker=${String(session.capabilities?.speaker?.isPrivate)}`
     );
 
-    // Adopt Mentra settings
+    // Adopt settings (optional, if configured in console)
     try {
       const bpm = session.settings.get<number>(SETTING_METRONOME_BPM, 110);
       const save = session.settings.get<boolean>(SETTING_SAVE_FOR_QA, false);
       const ctx = this.ctx(sessionId);
-      ctx.state.metronomeBPM = (bpm === 100 || bpm === 110 || bpm === 120 ? bpm : 110) as 100 | 110 | 120;
+      ctx.state.metronomeBPM = (bpm === 100 || bpm === 110 || bpm === 120 ? bpm : 110) as BPM;
       ctx.state.saveForQA = Boolean(save);
 
       const unsubBpm = session.events.onSettingChange<number>(SETTING_METRONOME_BPM, (val) => {
         if (val === 100 || val === 110 || val === 120) {
-          ctx.state.metronomeBPM = val;
+          ctx.state.metronomeBPM = val as BPM;
           if (ctx.state.currentState === "compressions") {
             this.stopMetronome(sessionId);
             this.startMetronome(session, sessionId);
@@ -528,7 +479,7 @@ export class Rescue extends AppServer {
       });
       this.addSub(sessionId, unsubBpm);
       this.addSub(sessionId, unsubSave);
-    } catch (e) {
+    } catch {
       session.logger.warn("Settings manager not available or misconfigured.");
     }
 
@@ -545,7 +496,7 @@ export class Rescue extends AppServer {
     });
     this.addSub(sessionId, unsubDisc);
 
-    // Enter welcome
+    // Enter welcome (audio only)
     await this.enterWelcome(session, sessionId);
   }
 
@@ -560,6 +511,6 @@ export class Rescue extends AppServer {
 }
 
 // Bootstrap server
-new Rescue().start().catch((err) => {
+new RescueApp().start().catch((err) => {
   console.error("Failed to start Rescue app:", err);
 });
