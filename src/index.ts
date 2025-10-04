@@ -11,6 +11,10 @@ if (!MENTRAOS_API_KEY) {
   process.exit(1);
 }
 
+// Metronome config: override with env if you want
+const TICK_URL = (process.env.TICK_URL || "https://cdn.pixabay.com/audio/2022/03/24/audio_719bb3b0e5.mp3").trim();
+const TICK_VOLUME = Math.min(1, Math.max(0, Number(process.env.TICK_VOLUME || "0.5"))); // 0..1
+
 // ---------------- Types ----------------
 type BPM = 100 | 110 | 120;
 type AppState = "welcome" | "safety_check" | "responsiveness_check" | "compressions" | "settings";
@@ -44,7 +48,7 @@ interface SessionContext {
   cameraBusy?: boolean;
 }
 
-// Settings keys (add these in Developer Console if you want)
+// Settings keys (optional, if you configured them in the Console)
 const SETTING_SAVE_FOR_QA = "save_for_qa";     // boolean
 const SETTING_METRONOME_BPM = "metronome_bpm"; // 100 | 110 | 120
 
@@ -71,7 +75,7 @@ function createInitialState(): RescueSessionState {
   };
 }
 
-// ---------------- Mock hand analyzer & local storage ----------------
+// ---------------- Optional QA storage (secondary save) ----------------
 class LocalPhotoStorage {
   private dir: string;
   constructor() {
@@ -88,19 +92,13 @@ class LocalPhotoStorage {
       return { success: false };
     }
   }
-  async analyze(_: Buffer): Promise<HandPlacementResult> {
-    await new Promise((r) => setTimeout(r, 300));
-    const pick = <T,>(arr: T[]) => arr[Math.floor(Math.random() * arr.length)];
-    const position = pick<HandPlacement>(["good", "high", "low", "left", "right", "uncertain"]);
-    const confidence = Math.round((Math.random() * 0.4 + 0.6) * 100) / 100;
-    return { position, confidence };
-  }
 }
-const photoStorage = new LocalPhotoStorage();
+const qaStorage = new LocalPhotoStorage();
 
 // ---------------- App ----------------
 class RescueApp extends AppServer {
   private contexts = new Map<string, SessionContext>();
+  private tickInFlight = new Map<string, boolean>(); // gate per-session
 
   constructor() {
     super({
@@ -149,29 +147,38 @@ class RescueApp extends AppServer {
     try { await session.audio.stopAudio(); } catch {}
   }
 
-  // ---- Metronome via audioUrl (audio-only)
+  // ---- Metronome (simple, gated, public HTTPS tick)
+  private async playTick(session: AppSession, sessionId: string) {
+    if (this.tickInFlight.get(sessionId)) return; // avoid overlapping calls
+    this.tickInFlight.set(sessionId, true);
+    try {
+      const res = await session.audio.playAudio({ audioUrl: TICK_URL, volume: TICK_VOLUME });
+      if (!res?.success) {
+        // emergency fallback to keep time
+        await session.audio.speak("tick", { voice_settings: { speed: 1.2 } });
+      }
+    } catch {
+      try { await session.audio.speak("tick", { voice_settings: { speed: 1.2 } }); } catch {}
+    } finally {
+      this.tickInFlight.set(sessionId, false);
+    }
+  }
+
   private startMetronome(session: AppSession, sessionId: string) {
     const ctx = this.ctx(sessionId);
     const period = Math.round(60000 / ctx.state.metronomeBPM);
 
     this.stopMetronome(sessionId);
-    session.logger.info(`Metronome start @ ${ctx.state.metronomeBPM} BPM`);
+    session.logger.info(`Metronome start @ ${ctx.state.metronomeBPM} BPM (period=${period}ms)`);
+    this.tickInFlight.set(sessionId, false);
 
     ctx.state.metronomeTimer = setInterval(async () => {
       if (ctx.state.speechGuardUntil && Date.now() < ctx.state.speechGuardUntil) return;
+      if (this.tickInFlight.get(sessionId)) return;
 
       ctx.state.compressionCount++;
 
-      try {
-        const result = await session.audio.playAudio({
-          // Short public tick
-          audioUrl: "https://cdn.pixabay.com/audio/2022/03/15/audio_b7a6b7dfc2.mp3",
-          volume: 0.5, // 0.0–1.0
-        });
-        if (!result.success && result.error) session.logger.error(`Tick error: ${result.error}`);
-      } catch (e) {
-        session.logger.error("Tick exception: " + String(e));
-      }
+      await this.playTick(session, sessionId);
 
       if (ctx.state.compressionCount % 10 === 0) {
         ctx.state.speechGuardUntil = Date.now() + 1100;
@@ -183,15 +190,35 @@ class RescueApp extends AppServer {
       }
     }, period);
   }
+
   private stopMetronome(sessionId: string) {
     const ctx = this.ctx(sessionId);
     if (ctx.state.metronomeTimer) {
       clearInterval(ctx.state.metronomeTimer);
       ctx.state.metronomeTimer = undefined;
     }
+    this.tickInFlight.set(sessionId, false);
   }
 
-  // ---- Camera helpers (per docs)
+  // ---- Your upload hook (stub – fill in if you have a backend)
+  private async uploadPhotoToAPI(buffer: Buffer, mimeType: string): Promise<void> {
+    // Example:
+    // const form = new FormData();
+    // form.append("photo", new Blob([buffer], { type: mimeType }), "cpr.jpg");
+    // await fetch("https://your-backend.example.com/upload", { method: "POST", body: form });
+    void buffer; void mimeType;
+  }
+
+  // ---- Photo capture: single try/catch flow (your style) ----
+  private async getPhotoOrThrow(session: AppSession) {
+    try {
+      return await session.camera.requestPhoto({ size: "small" }); // fast path
+    } catch (eSmall) {
+      session.logger.warn(`requestPhoto(small) failed; retrying default. ${String(eSmall)}`);
+      return await session.camera.requestPhoto(); // default (medium)
+    }
+  }
+
   private guidanceText(result: HandPlacementResult) {
     const map: Record<HandPlacement, string> = {
       good: "Centered, keep going.",
@@ -218,7 +245,7 @@ class RescueApp extends AppServer {
 
     ctx.cameraBusy = true;
     try {
-      // Optional: ensure CAMERA permission if your build uses permissions manager
+      // (optional) permissions manager
       // @ts-ignore
       if (session.permissions?.ensure) {
         // @ts-ignore
@@ -228,40 +255,52 @@ class RescueApp extends AppServer {
       ctx.state.speechGuardUntil = Date.now() + 900;
       await session.audio.speak("Capturing photo to check hand position.");
 
-      // Per docs: requestPhoto({ size }) returns PhotoData with buffer + metadata
-      let photo = await session.camera.requestPhoto({ size: "small" }); // faster
-      if (!photo?.buffer) {
-        // brief backoff → default (medium)
-        await new Promise((r) => setTimeout(r, 350));
-        photo = await session.camera.requestPhoto();
-      }
-      if (!photo?.buffer) throw new Error("NO_PHOTO_BUFFER");
+      // ✅ single-flow style: try small; if it throws, fallback to default via catch
+      const photo = await this.getPhotoOrThrow(session);
 
+      // ---- Your “processPhoto” pattern ----
+      const base64String = photo.buffer.toString("base64");
+      session.logger.info(`Photo as base64 (first 50 chars): ${base64String.substring(0, 50)}...`);
+
+      const filename = path.join(process.cwd(), `photo_${Date.now()}.jpg`);
+      fs.writeFileSync(filename, photo.buffer);
+      session.logger.info(`Photo saved to file: ${filename}`);
+
+      await this.uploadPhotoToAPI(photo.buffer as Buffer, photo.mimeType);
+
+      // ---- App-specific: analyze + guidance
       ctx.state.lastHandCheckTime = Date.now();
       session.logger.info(
         `Photo OK: ${photo.filename} ${photo.mimeType} ${photo.size}B (id=${photo.requestId})`
       );
 
-      const result = await photoStorage.analyze(photo.buffer as Buffer);
-      const guidance = this.guidanceText(result);
+      const result: HandPlacementResult = await (async () => {
+        // mock analysis (replace with real ML later)
+        await new Promise((r) => setTimeout(r, 300));
+        const options: HandPlacement[] = ["good", "high", "low", "left", "right", "uncertain"];
+        const position = options[Math.floor(Math.random() * options.length)];
+        const confidence = Math.round((Math.random() * 0.4 + 0.6) * 100) / 100;
+        return { position, confidence };
+      })();
 
-      await session.audio.speak(guidance);
+      await session.audio.speak(this.guidanceText(result));
 
+      // Optional QA secondary save
       if (ctx.state.saveForQA) {
-        const saved = await photoStorage.save(photo.buffer as Buffer);
-        if (!saved.success) session.logger.error("Save photo failed");
+        const saved = await qaStorage.save(photo.buffer as Buffer);
+        if (!saved.success) session.logger.warn("QA save failed");
       }
     } catch (e: any) {
       const code = e?.code || e?.name || "UNKNOWN_ERROR";
-      const msg = e?.message || String(e);
-      session.logger.error(`Photo failed: code=${code} msg=${msg}`);
+      const msg  = e?.message || String(e);
+      session.logger.error(`Photo capture/processing failed: code=${code} msg=${msg}`);
       await session.audio.speak("Unable to check hand position right now. Continue compressions and try again.");
     } finally {
       ctx.cameraBusy = false;
     }
   }
 
-  // ---- Flow
+  // ---- Flow (audio-only)
   private async enterWelcome(session: AppSession, sessionId: string) {
     const ctx = this.ctx(sessionId);
     ctx.state.currentState = "welcome";
@@ -332,7 +371,7 @@ class RescueApp extends AppServer {
     );
   }
 
-  // ---- Transcription router (robust + global “check hands”)
+  // ---- Transcription router (global “check hands” and robust finals)
   private installTranscriptionRouter(session: AppSession, sessionId: string) {
     const unsub = session.events.onTranscription(async (data) => {
       const text = normalize(data?.text || "");
@@ -342,7 +381,7 @@ class RescueApp extends AppServer {
       const ctx = this.ctx(sessionId);
       session.logger.info(`ASR: state=${ctx.state.currentState} text="${text}"`);
 
-      // Global: restart flow
+      // Global: restart
       if (text.includes("start") && text.includes("rescue")) {
         await this.stopAllAudio(session);
         this.stopMetronome(sessionId);
@@ -363,7 +402,7 @@ class RescueApp extends AppServer {
         return;
       }
 
-      // Global: check hands (works in any state; accepts variants)
+      // Global: “check hands”
       if (RE_CHECK_HANDS.test(text)) {
         if (ctx.state.currentState !== "compressions") {
           await this.queueTTS(session, sessionId, "Starting compressions, then I’ll check hand position.");
@@ -450,12 +489,11 @@ class RescueApp extends AppServer {
       ttsPlaying: false,
     });
 
-    // Audio-only capabilities note
     session.logger.info(
       `Capabilities: camera=${String(session.capabilities?.hasCamera)} privateSpeaker=${String(session.capabilities?.speaker?.isPrivate)}`
     );
 
-    // Adopt settings (optional, if configured in console)
+    // Settings adoption (optional)
     try {
       const bpm = session.settings.get<number>(SETTING_METRONOME_BPM, 110);
       const save = session.settings.get<boolean>(SETTING_SAVE_FOR_QA, false);
@@ -496,7 +534,7 @@ class RescueApp extends AppServer {
     });
     this.addSub(sessionId, unsubDisc);
 
-    // Enter welcome (audio only)
+    // Enter welcome
     await this.enterWelcome(session, sessionId);
   }
 
