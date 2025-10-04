@@ -21,14 +21,14 @@ const ProfileSettingsPage: React.FC = () => {
   }
 
   return (
-    <div className="min-h-screen bg-gray-950">
+    <div className="min-h-screen bg-primary-50">
       {/* Header */}
-      <div className="bg-gray-900 border-b border-gray-700">
+      <div className="bg-white/80 backdrop-blur-sm border-b border-primary-200 shadow-sm">
         <div className="max-w-4xl mx-auto px-6 py-4">
             <div className="flex items-center space-x-4">
               <Link 
                 to="/"
-                className="flex items-center space-x-2 text-gray-400 hover:text-white transition-colors"
+                className="flex items-center space-x-2 text-primary-600 hover:text-primary-800 transition-colors"
               >
                 <ArrowLeft className="w-5 h-5" />
                 <span>Back to Dashboard</span>

@@ -6,6 +6,7 @@ export const mockReport: AfterActionReport = {
     userId: 'user-123',
     startTime: new Date('2025-10-03T14:30:00'),
     endTime: new Date('2025-10-03T14:45:30'),
+    trialType: 'real',
     steps: [
       {
         id: 'step-1',
@@ -371,3 +372,60 @@ export const mockUser: User = {
   createdAt: new Date('2023-06-15T10:00:00'),
   updatedAt: new Date('2025-01-15T14:30:00')
 }
+
+export const mockSessions = [
+  {
+    id: 'session-001',
+    date: new Date('2025-10-03T14:30:00'),
+    duration: '15:30',
+    score: 82,
+    status: 'completed' as const,
+    passed: true,
+    trialType: 'real' as const
+  },
+  {
+    id: 'session-002',
+    date: new Date('2025-10-02T10:15:00'),
+    duration: '18:45',
+    score: 75,
+    status: 'completed' as const,
+    passed: true,
+    trialType: 'real' as const
+  },
+  {
+    id: 'session-003',
+    date: new Date('2025-10-01T09:00:00'),
+    duration: '12:20',
+    score: 68,
+    status: 'completed' as const,
+    passed: false,
+    trialType: 'practice' as const
+  },
+  {
+    id: 'session-004',
+    date: new Date('2025-09-30T16:20:00'),
+    duration: '14:45',
+    score: 89,
+    status: 'completed' as const,
+    passed: true,
+    trialType: 'practice' as const
+  },
+  {
+    id: 'session-005',
+    date: new Date('2025-09-29T11:30:00'),
+    duration: '13:15',
+    score: 73,
+    status: 'completed' as const,
+    passed: true,
+    trialType: 'real' as const
+  },
+  {
+    id: 'session-006',
+    date: new Date('2025-09-28T14:45:00'),
+    duration: '16:30',
+    score: 91,
+    status: 'completed' as const,
+    passed: true,
+    trialType: 'practice' as const
+  }
+]

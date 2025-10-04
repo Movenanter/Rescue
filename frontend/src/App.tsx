@@ -6,7 +6,7 @@ import TrainingSession from './components/TrainingSession'
 
 function App() {
   return (
-    <div className="min-h-screen bg-gray-950">
+    <div className="min-h-screen bg-primary-50">
       <Routes>
         <Route path="/" element={<Dashboard />} />
         <Route path="/training" element={<TrainingSession />} />

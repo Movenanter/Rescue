@@ -40,10 +40,10 @@ const AfterActionReportPage: React.FC = () => {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-gray-950 flex items-center justify-center">
+      <div className="min-h-screen bg-primary-50 flex items-center justify-center">
         <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-lime-400 mx-auto mb-4"></div>
-          <p className="text-gray-400">Loading report...</p>
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary-600 mx-auto mb-4"></div>
+          <p className="text-primary-600">Loading report...</p>
         </div>
       </div>
     )
@@ -51,12 +51,12 @@ const AfterActionReportPage: React.FC = () => {
 
   if (error || !report) {
     return (
-      <div className="min-h-screen bg-gray-950 flex items-center justify-center">
+      <div className="min-h-screen bg-primary-50 flex items-center justify-center">
         <div className="text-center">
-          <p className="text-red-400 mb-4">{error || 'Report not found'}</p>
+          <p className="text-red-600 mb-4">{error || 'Report not found'}</p>
           <button
             onClick={() => navigate('/')}
-            className="px-4 py-2 bg-gray-800 text-gray-300 rounded-lg hover:bg-gray-700 transition-colors"
+            className="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition-colors shadow-lg"
           >
             Return to Dashboard
           </button>
@@ -66,12 +66,12 @@ const AfterActionReportPage: React.FC = () => {
   }
 
   return (
-    <div className="min-h-screen bg-gray-950">
-      <div className="sticky top-0 bg-gray-950/95 backdrop-blur-sm border-b border-gray-800 z-50">
+    <div className="min-h-screen bg-primary-50">
+      <div className="sticky top-0 bg-white/90 backdrop-blur-sm border-b border-primary-200 shadow-sm z-50">
         <div className="max-w-7xl mx-auto px-4 py-4">
           <button
             onClick={() => navigate('/')}
-            className="flex items-center space-x-2 text-gray-400 hover:text-lime-400 transition-colors"
+            className="flex items-center space-x-2 text-primary-600 hover:text-primary-800 transition-colors"
           >
             <ArrowLeft className="w-5 h-5" />
             <span>Back to Dashboard</span>
