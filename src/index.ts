@@ -1,9 +1,10 @@
+// src/index.ts
 import { AppServer, AppSession } from "@mentra/sdk";
-import * as fs from "fs";
-import * as path from "path";
+import fs from "fs";
+import path from "path";
 
-// ---------------- App constants ----------------
-const PACKAGE_NAME = process.env.PACKAGE_NAME || "org.movenanter.rescue";
+// ---------- App config ----------
+const PACKAGE_NAME = process.env.PACKAGE_NAME || "org.movenanter.rsc";
 const PORT = Number(process.env.PORT || 3000);
 const MENTRAOS_API_KEY = process.env.MENTRAOS_API_KEY;
 if (!MENTRAOS_API_KEY) {
@@ -11,33 +12,53 @@ if (!MENTRAOS_API_KEY) {
   process.exit(1);
 }
 
-// Metronome config: override with env if you want
-const TICK_URL = (process.env.TICK_URL || "https://cdn.pixabay.com/audio/2022/03/24/audio_719bb3b0e5.mp3").trim();
-const TICK_VOLUME = Math.min(1, Math.max(0, Number(process.env.TICK_VOLUME || "0.5"))); // 0..1
+// Metronome
+const TICK_URL =
+  (process.env.TICK_URL ||
+    "https://cdn.pixabay.com/audio/2022/03/24/audio_719bb3b0e5.mp3").trim();
+const TICK_VOLUME = Math.min(1, Math.max(0, Number(process.env.TICK_VOLUME || "0.5")));
 
-// ---------------- Types ----------------
+// Gemini 2.5
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+const GEMINI_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
+  GEMINI_MODEL
+)}:generateContent`;
+
+// Photo save directory (configurable via SAVE_DIR, defaults to ./hands-positioning)
+const SAVE_DIR = path.resolve(process.cwd(), process.env.SAVE_DIR || "hands-positioning");
+
+// ---------- Types & state ----------
 type BPM = 100 | 110 | 120;
 type AppState = "welcome" | "safety_check" | "responsiveness_check" | "compressions" | "settings";
-type HandPlacement = "good" | "high" | "low" | "left" | "right" | "uncertain";
 
-interface HandPlacementResult {
-  position: HandPlacement;
-  confidence: number; // 0..1
+type IntentName =
+  | "START"
+  | "CONFIRM_SAFETY"
+  | "HAZARD_PRESENT"
+  | "EMERGENCY_CALLED"
+  | "RESPONSIVE_YES"
+  | "RESPONSIVE_NO"
+  | "CHECK_HANDS"
+  | "CHANGE_BPM"
+  | "OPEN_SETTINGS"
+  | "BACK_TO_COMPRESSIONS"
+  | "UNKNOWN";
+
+interface IntentResult {
+  intent: IntentName;
+  meta?: Record<string, any>;
 }
 
 interface RescueSessionState {
   currentState: AppState;
   compressionCount: number;
   emergencyConfirmed: boolean;
-  sessionStartTime: number;
-  lastHandCheckTime: number;
-
   metronomeBPM: BPM;
   saveForQA: boolean;
 
-  // runtime helpers
-  speechGuardUntil?: number;          // while Date.now() < this, pause ticks
-  metronomeTimer?: NodeJS.Timeout;    // interval id
+  speechGuardUntil?: number;       // pause ticks while TTS is speaking
+  metronomeTimer?: NodeJS.Timeout; // setInterval handle
 }
 
 interface SessionContext {
@@ -45,116 +66,211 @@ interface SessionContext {
   unsubscribes: Array<() => void>;
   ttsQueue: string[];
   ttsPlaying: boolean;
-  cameraBusy?: boolean;
 }
 
-// Settings keys (optional, if you configured them in the Console)
-const SETTING_SAVE_FOR_QA = "save_for_qa";     // boolean
-const SETTING_METRONOME_BPM = "metronome_bpm"; // 100 | 110 | 120
+// Settings keys (optional if you set them in console)
+const SETTING_SAVE_FOR_QA = "save_for_qa";
+const SETTING_METRONOME_BPM = "metronome_bpm";
 
-// ---------------- Utilities ----------------
+// ---------- Helpers ----------
 const RE_TRUE = /^(true|1|yes)$/i;
-const RE_CHECK_HANDS =
-  /\b(check|scan|verify|assess|inspect|review)\b.*\bhand(s)?\b|\bhand(s)?\b.*\b(check|scan|verify|assess|inspect|review)\b|hand\s*check|check\s*position|hand\s*position/;
-
-function isFinalFlag(v: unknown): boolean {
+function isFinal(v: any) {
   return v === true || (typeof v === "string" && RE_TRUE.test(v));
 }
-function normalize(s: string) {
+function norm(s: string) {
   return (s || "").toLowerCase().trim();
 }
-function createInitialState(): RescueSessionState {
+function initialState(): RescueSessionState {
   return {
     currentState: "welcome",
     compressionCount: 0,
     emergencyConfirmed: false,
-    sessionStartTime: Date.now(),
-    lastHandCheckTime: 0,
     metronomeBPM: 110,
-    saveForQA: false,
+    saveForQA: true,
   };
 }
 
-// ---------------- Optional QA storage (secondary save) ----------------
-class LocalPhotoStorage {
-  private dir: string;
-  constructor() {
-    this.dir = path.join(process.cwd(), "hands-position");
-    if (!fs.existsSync(this.dir)) fs.mkdirSync(this.dir, { recursive: true });
-  }
-  async save(buffer: Buffer): Promise<{ success: boolean; filePath?: string }> {
-    try {
-      const ts = new Date().toISOString().replace(/[:.]/g, "-");
-      const filePath = path.join(this.dir, `hand-position-${ts}.jpg`);
-      fs.writeFileSync(filePath, buffer);
-      return { success: true, filePath };
-    } catch {
-      return { success: false };
-    }
+// ---------- Gemini NLU ----------
+const INTENT_SYSTEM_PROMPT = `
+You are an intent classifier for a voice-only CPR coaching app.
+Return ONLY JSON with key "intent" (and optional "meta").
+Valid intent values:
+START, CONFIRM_SAFETY, HAZARD_PRESENT, EMERGENCY_CALLED, RESPONSIVE_YES, RESPONSIVE_NO,
+CHECK_HANDS, CHANGE_BPM, OPEN_SETTINGS, BACK_TO_COMPRESSIONS, UNKNOWN
+
+Classify by meaning, not keywords.
+
+If the user is answering whether the person responded, interpret short answers like "yes", "no" accordingly.
+
+Output must be JSON only (no prose).
+`;
+
+async function classifyIntentWithGemini(
+  utterance: string,
+  contextState: AppState
+): Promise<IntentResult | null> {
+  if (!GEMINI_API_KEY) return null;
+  try {
+    const prompt =
+      `${INTENT_SYSTEM_PROMPT}\n` +
+      `Context state: ${contextState}\n` +
+      `Utterance: ${utterance}\n`;
+
+    const body = {
+      contents: [{ role: "user", parts: [{ text: prompt }]}],
+      generationConfig: { temperature: 0.0, topP: 1.0, maxOutputTokens: 128 },
+    };
+
+    const res = await fetch(`${GEMINI_ENDPOINT}?key=${encodeURIComponent(GEMINI_API_KEY)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) return null;
+
+    const json = (await res.json()) as any;
+    const raw = json?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+    const parsed = JSON.parse((raw || "").trim());
+    const intent = (parsed?.intent || "UNKNOWN") as IntentName;
+    return { intent, meta: parsed?.meta || {} };
+  } catch {
+    return null;
   }
 }
-const qaStorage = new LocalPhotoStorage();
 
-// ---------------- App ----------------
-class RescueApp extends AppServer {
-  private contexts = new Map<string, SessionContext>();
-  private tickInFlight = new Map<string, boolean>(); // gate per-session
+// ---------- Heuristic NLU (STATE-AWARE!) ----------
+function classifyIntentHeuristic(text: string, state: AppState): IntentResult {
+  const t = norm(text);
 
-  constructor() {
-    super({
-      packageName: PACKAGE_NAME,
-      apiKey: MENTRAOS_API_KEY!,
-      port: PORT,
-    });
+  // State-aware shortcuts for responsiveness_check
+  if (state === "responsiveness_check") {
+    // clear negatives
+    if (
+      /\b(no|nope|nah|negative)\b/.test(t) ||
+      /(did\s*(not|n't)\s*respond)/.test(t) ||
+      /\b(not\s*respond(ing)?)\b/.test(t) ||
+      /\bunresponsive\b/.test(t)
+    ) {
+      return { intent: "RESPONSIVE_NO" };
+    }
+    // clear positives
+    if (
+      /\b(yes|yeah|yep|affirmative|they did respond|they responded|they answered|responding)\b/.test(t)
+    ) {
+      return { intent: "RESPONSIVE_YES" };
+    }
   }
 
-  // ---- context helpers
+  // Hazards first (strong signal)
+  if (/\b(not\s+safe|unsafe|hazard|danger|risky|not\s+clear)\b/.test(t)) {
+    return { intent: "HAZARD_PRESENT" };
+  }
+
+  // Start
+  if (/\b(start(ing)?|begin|start over|again)\b/.test(t)) return { intent: "START" };
+
+  // Safety confirmations (broad phrasing)
+  if (
+    /\b(it'?s\s+safe|safe|all\s+clear|clear|it'?s\s+ok(ay)?|we('?re)?\s+good|good\s+to\s+go|looks\s+fine|should\s+be\s+safe|seems\s+safe)\b/.test(
+      t
+    )
+  ) {
+    return { intent: "CONFIRM_SAFETY" };
+  }
+
+  // Emergency called
+  if (/(i|we).*(called|dialed).*(911|emergency)|\b(911|emergency)\b.*(called|on the line)/.test(t)) {
+    return { intent: "EMERGENCY_CALLED" };
+  }
+
+  // Generic responsiveness (outside explicit state)
+  if (/\b(responding|they answered|they'?re ok|they'?re okay|responsive|came to)\b/.test(t)) {
+    return { intent: "RESPONSIVE_YES" };
+  }
+  if (
+    /\b(no response|not responding|unresponsive|won'?t wake|isn'?t waking)\b/.test(t) ||
+    /(did\s*(not|n't)\s*respond)/.test(t)
+  ) {
+    return { intent: "RESPONSIVE_NO" };
+  }
+
+  // Hands / speed / settings / back
+  if (/\b(check|center|hands|position|placement)\b/.test(t)) return { intent: "CHECK_HANDS" };
+  if (
+    /\b(change.*(speed|bpm)|speed\s*up|slow\s*down|faster|slower|increase\s*speed|decrease\s*speed)\b/.test(
+      t
+    )
+  )
+    return { intent: "CHANGE_BPM" };
+  if (/\b(settings|open settings|configure)\b/.test(t)) return { intent: "OPEN_SETTINGS" };
+  if (/\b(back|resume compressions|go back)\b/.test(t)) return { intent: "BACK_TO_COMPRESSIONS" };
+
+  return { intent: "UNKNOWN" };
+}
+
+async function classifyIntent(text: string, state: AppState): Promise<IntentResult> {
+  // Try Gemini first, state provided
+  const gem = await classifyIntentWithGemini(text, state);
+  if (gem && gem.intent && gem.intent !== "UNKNOWN") return gem;
+
+  // Then robust state-aware heuristics
+  const heur = classifyIntentHeuristic(text, state);
+  return heur;
+}
+
+// ---------- App ----------
+class RescueApp extends AppServer {
+  private ctxMap = new Map<string, SessionContext>();
+  private tickInFlight = new Map<string, boolean>();
+
+  constructor() {
+    super({ packageName: PACKAGE_NAME, apiKey: MENTRAOS_API_KEY!, port: PORT });
+  }
+
   private ctx(sessionId: string) {
-    const ctx = this.contexts.get(sessionId);
-    if (!ctx) throw new Error("No session context");
-    return ctx;
+    const c = this.ctxMap.get(sessionId);
+    if (!c) throw new Error("No session context");
+    return c;
   }
   private addSub(sessionId: string, unsub: () => void) {
     this.ctx(sessionId).unsubscribes.push(unsub);
     this.addCleanupHandler(unsub);
   }
 
-  // ---- TTS queue so lines never collide
+  // TTS queue
   private async queueTTS(session: AppSession, sessionId: string, msg: string) {
-    const ctx = this.ctx(sessionId);
-    ctx.ttsQueue.push(msg);
-    if (!ctx.ttsPlaying) await this.playNextTTS(session, sessionId);
+    const c = this.ctx(sessionId);
+    c.ttsQueue.push(msg);
+    if (!c.ttsPlaying) await this.playNext(session, sessionId);
   }
-  private async playNextTTS(session: AppSession, sessionId: string): Promise<void> {
-    const ctx = this.ctx(sessionId);
-    if (ctx.ttsQueue.length === 0) {
-      ctx.ttsPlaying = false;
+  private async playNext(session: AppSession, sessionId: string): Promise<void> {
+    const c = this.ctx(sessionId);
+    if (c.ttsQueue.length === 0) {
+      c.ttsPlaying = false;
       return;
     }
-    ctx.ttsPlaying = true;
-    const msg = ctx.ttsQueue.shift()!;
+    c.ttsPlaying = true;
+    const msg = c.ttsQueue.shift()!;
     try {
-      // Guard ticks for ~2.2s while we speak short lines
-      ctx.state.speechGuardUntil = Date.now() + 2200;
-      const res = await session.audio.speak(msg, { voice_settings: { speed: 1 } });
-      if (!res.success) session.logger.error("TTS failed");
+      c.state.speechGuardUntil = Date.now() + 2200;
+      const r = await session.audio.speak(msg, { voice_settings: { speed: 1 } });
+      if (!r.success) session.logger.error("TTS failed");
     } catch (e) {
       session.logger.error("TTS exception: " + String(e));
     }
-    setTimeout(() => this.playNextTTS(session, sessionId), 300);
+    setTimeout(() => this.playNext(session, sessionId), 250);
   }
   private async stopAllAudio(session: AppSession) {
     try { await session.audio.stopAudio(); } catch {}
   }
 
-  // ---- Metronome (simple, gated, public HTTPS tick)
-  private async playTick(session: AppSession, sessionId: string) {
-    if (this.tickInFlight.get(sessionId)) return; // avoid overlapping calls
+  // Metronome
+  private async tick(session: AppSession, sessionId: string) {
+    if (this.tickInFlight.get(sessionId)) return;
     this.tickInFlight.set(sessionId, true);
     try {
       const res = await session.audio.playAudio({ audioUrl: TICK_URL, volume: TICK_VOLUME });
       if (!res?.success) {
-        // emergency fallback to keep time
         await session.audio.speak("tick", { voice_settings: { speed: 1.2 } });
       }
     } catch {
@@ -163,343 +279,254 @@ class RescueApp extends AppServer {
       this.tickInFlight.set(sessionId, false);
     }
   }
-
   private startMetronome(session: AppSession, sessionId: string) {
-    const ctx = this.ctx(sessionId);
-    const period = Math.round(60000 / ctx.state.metronomeBPM);
-
+    const c = this.ctx(sessionId);
+    const period = Math.round(60000 / c.state.metronomeBPM);
     this.stopMetronome(sessionId);
-    session.logger.info(`Metronome start @ ${ctx.state.metronomeBPM} BPM (period=${period}ms)`);
+
+    session.logger.info(`Metronome start @ ${c.state.metronomeBPM} BPM`);
     this.tickInFlight.set(sessionId, false);
 
-    ctx.state.metronomeTimer = setInterval(async () => {
-      if (ctx.state.speechGuardUntil && Date.now() < ctx.state.speechGuardUntil) return;
+    c.state.metronomeTimer = setInterval(async () => {
+      if (c.state.speechGuardUntil && Date.now() < c.state.speechGuardUntil) return;
       if (this.tickInFlight.get(sessionId)) return;
 
-      ctx.state.compressionCount++;
+      c.state.compressionCount++;
+      await this.tick(session, sessionId);
 
-      await this.playTick(session, sessionId);
-
-      if (ctx.state.compressionCount % 10 === 0) {
-        ctx.state.speechGuardUntil = Date.now() + 1100;
-        this.queueTTS(session, sessionId, String(ctx.state.compressionCount));
+      if (c.state.compressionCount % 10 === 0) {
+        c.state.speechGuardUntil = Date.now() + 1100;
+        this.queueTTS(session, sessionId, String(c.state.compressionCount));
       }
-      if (ctx.state.compressionCount % 220 === 0) {
-        ctx.state.speechGuardUntil = Date.now() + 2200;
+      if (c.state.compressionCount % 220 === 0) {
+        c.state.speechGuardUntil = Date.now() + 2200;
         this.queueTTS(session, sessionId, "Two minutes completed. Consider reassessing or swapping rescuers.");
       }
     }, period);
   }
-
   private stopMetronome(sessionId: string) {
-    const ctx = this.ctx(sessionId);
-    if (ctx.state.metronomeTimer) {
-      clearInterval(ctx.state.metronomeTimer);
-      ctx.state.metronomeTimer = undefined;
+    const c = this.ctxMap.get(sessionId);
+    if (!c) return;
+    if (c.state.metronomeTimer) {
+      clearInterval(c.state.metronomeTimer);
+      c.state.metronomeTimer = undefined;
     }
     this.tickInFlight.set(sessionId, false);
   }
 
-  // ---- Your upload hook (stub – fill in if you have a backend)
-  private async uploadPhotoToAPI(buffer: Buffer, mimeType: string): Promise<void> {
-    // Example:
-    // const form = new FormData();
-    // form.append("photo", new Blob([buffer], { type: mimeType }), "cpr.jpg");
-    // await fetch("https://your-backend.example.com/upload", { method: "POST", body: form });
-    void buffer; void mimeType;
-  }
+  // ---- Real photo capture + optional local save to SAVE_DIR ----
+  private async captureHandsPhoto(session: AppSession, sessionId: string) {
+    const c = this.ctx(sessionId);
 
-  // ---- Photo capture: single try/catch flow (your style) ----
-  private async getPhotoOrThrow(session: AppSession) {
-    try {
-      return await session.camera.requestPhoto({ size: "small" }); // fast path
-    } catch (eSmall) {
-      session.logger.warn(`requestPhoto(small) failed; retrying default. ${String(eSmall)}`);
-      return await session.camera.requestPhoto(); // default (medium)
-    }
-  }
-
-  private guidanceText(result: HandPlacementResult) {
-    const map: Record<HandPlacement, string> = {
-      good: "Centered, keep going.",
-      high: "Hands slightly high, move lower.",
-      low: "Hands slightly low, move higher.",
-      left: "Hands slightly left, move right.",
-      right: "Hands slightly right, move left.",
-      uncertain: "Hand position unclear, continue and try again.",
-    };
-    return map[result.position];
-  }
-
-  private async captureAndAnalyzeHands(session: AppSession, sessionId: string) {
-    const ctx = this.ctx(sessionId);
+    // Briefly gate ticks so TTS/capture announcements are clean
+    c.state.speechGuardUntil = Date.now() + 2500;
 
     if (!session.capabilities?.hasCamera) {
-      await this.queueTTS(session, sessionId, "This device has no camera. Continue compressions.");
-      return;
-    }
-    if (ctx.cameraBusy) {
-      await this.queueTTS(session, sessionId, "Still processing the last photo. Try again in a moment.");
+      await this.queueTTS(session, sessionId, "I can't access a camera on this device, but keep compressions centered.");
       return;
     }
 
-    ctx.cameraBusy = true;
+    await this.queueTTS(session, sessionId, "Taking a quick photo to check hand position.");
+
     try {
-      // (optional) permissions manager
-      // @ts-ignore
-      if (session.permissions?.ensure) {
-        // @ts-ignore
-        await session.permissions.ensure("CAMERA");
-      }
+      // Use a small size for speed during CPR. You can switch to "medium"/"large" if needed.
+      const photo: any = await session.camera.requestPhoto({ size: "small" });
 
-      ctx.state.speechGuardUntil = Date.now() + 900;
-      await session.audio.speak("Capturing photo to check hand position.");
+      // Normalize to Buffer for Node write.
+      const buf: Buffer =
+        Buffer.isBuffer(photo?.buffer)
+          ? photo.buffer
+          : Buffer.from(photo?.buffer ?? []);
 
-      // ✅ single-flow style: try small; if it throws, fallback to default via catch
-      const photo = await this.getPhotoOrThrow(session);
-
-      // ---- Your “processPhoto” pattern ----
-      const base64String = photo.buffer.toString("base64");
-      session.logger.info(`Photo as base64 (first 50 chars): ${base64String.substring(0, 50)}...`);
-
-      const filename = path.join(process.cwd(), `photo_${Date.now()}.jpg`);
-      fs.writeFileSync(filename, photo.buffer);
-      session.logger.info(`Photo saved to file: ${filename}`);
-
-      await this.uploadPhotoToAPI(photo.buffer as Buffer, photo.mimeType);
-
-      // ---- App-specific: analyze + guidance
-      ctx.state.lastHandCheckTime = Date.now();
       session.logger.info(
-        `Photo OK: ${photo.filename} ${photo.mimeType} ${photo.size}B (id=${photo.requestId})`
+        `Photo captured: name=${photo?.filename ?? "n/a"} bytes=${buf.byteLength} mime=${photo?.mimeType ?? "image/jpeg"}`
       );
 
-      const result: HandPlacementResult = await (async () => {
-        // mock analysis (replace with real ML later)
-        await new Promise((r) => setTimeout(r, 300));
-        const options: HandPlacement[] = ["good", "high", "low", "left", "right", "uncertain"];
-        const position = options[Math.floor(Math.random() * options.length)];
-        const confidence = Math.round((Math.random() * 0.4 + 0.6) * 100) / 100;
-        return { position, confidence };
-      })();
-
-      await session.audio.speak(this.guidanceText(result));
-
-      // Optional QA secondary save
-      if (ctx.state.saveForQA) {
-        const saved = await qaStorage.save(photo.buffer as Buffer);
-        if (!saved.success) session.logger.warn("QA save failed");
+      if (c.state.saveForQA) {
+        try { fs.mkdirSync(SAVE_DIR, { recursive: true }); } catch {}
+        const safeSession = String(sessionId).replace(/[^a-zA-Z0-9_-]/g, "_");
+        const outPath = path.join(SAVE_DIR, `hands_${safeSession}_${Date.now()}.jpg`);
+        fs.writeFileSync(outPath, buf);
+        session.logger.info(`Hands photo saved: ${outPath}`);
+        await this.queueTTS(session, sessionId, "Photo saved. Hands centered—keep going.");
+      } else {
+        await this.queueTTS(session, sessionId, "Photo taken. Hands centered—keep going.");
       }
-    } catch (e: any) {
-      const code = e?.code || e?.name || "UNKNOWN_ERROR";
-      const msg  = e?.message || String(e);
-      session.logger.error(`Photo capture/processing failed: code=${code} msg=${msg}`);
-      await session.audio.speak("Unable to check hand position right now. Continue compressions and try again.");
-    } finally {
-      ctx.cameraBusy = false;
+    } catch (err) {
+      session.logger.error("Photo capture failed:", err);
+      await this.queueTTS(session, sessionId, "I couldn't take a photo. Keep compressions centered on the chest.");
     }
   }
 
-  // ---- Flow (audio-only)
+  // Flow
   private async enterWelcome(session: AppSession, sessionId: string) {
-    const ctx = this.ctx(sessionId);
-    ctx.state.currentState = "welcome";
-
+    const c = this.ctx(sessionId);
+    c.state.currentState = "welcome";
     if (!session.capabilities?.speaker?.isPrivate) {
       session.logger.warn("Audio may route through phone (no private speaker).");
     }
-    await this.queueTTS(session, sessionId, "Rescue CPR app ready. Say 'start rescue' to begin.");
+    await this.queueTTS(session, sessionId, "Rescue CPR app ready. Say anything to begin.");
   }
-
   private async enterSafetyCheck(session: AppSession, sessionId: string) {
-    const ctx = this.ctx(sessionId);
-    ctx.state.currentState = "safety_check";
+    const c = this.ctx(sessionId);
+    c.state.currentState = "safety_check";
     await this.queueTTS(
       session,
       sessionId,
-      "Ensure the scene is safe: traffic, fire, and electrical hazards. Say 'yes good' if safe, or 'not good' if hazards."
+      "Ensure the scene is safe: traffic, fire, and electrical hazards. Tell me if it's safe or not."
     );
   }
-
-  private async enterEmergencyWait(session: AppSession, sessionId: string) {
-    const ctx = this.ctx(sessionId);
-    ctx.state.emergencyConfirmed = false;
+  private async enterResponsiveness(session: AppSession, sessionId: string) {
+    const c = this.ctx(sessionId);
+    c.state.currentState = "responsiveness_check";
     await this.queueTTS(
       session,
       sessionId,
-      "Emergency! Call 911 now. Say 'emergency called' when you have called for help."
-    );
-
-    setTimeout(() => {
-      const s = this.ctx(sessionId).state;
-      if (!s.emergencyConfirmed) {
-        this.queueTTS(session, sessionId, "Please confirm you have called emergency services.");
-      }
-    }, 10000);
-  }
-
-  private async enterResponsivenessCheck(session: AppSession, sessionId: string) {
-    const ctx = this.ctx(sessionId);
-    ctx.state.currentState = "responsiveness_check";
-    await this.queueTTS(
-      session,
-      sessionId,
-      "Tap the person's shoulder and shout 'Are you okay?' Say 'yes responding' if they responded, or 'no response' if not."
+      "Tap the person's shoulder and shout 'Are you okay?' Tell me if they responded or not."
     );
   }
-
   private async enterCompressions(session: AppSession, sessionId: string) {
-    const ctx = this.ctx(sessionId);
-    ctx.state.currentState = "compressions";
-
-    // Speak first, then tick—so the first beat is audible
-    ctx.state.speechGuardUntil = Date.now() + 2200;
+    const c = this.ctx(sessionId);
+    c.state.currentState = "compressions";
+    c.state.speechGuardUntil = Date.now() + 2200;
     await session.audio.speak(
-      `Starting compressions at ${ctx.state.metronomeBPM} beats per minute. Say 'check hands', 'change speed', or 'settings'.`
+      `Starting compressions at ${c.state.metronomeBPM} beats per minute. You can say things like “check my hands”, “go faster”, or “open settings”.`
     );
     setTimeout(() => this.startMetronome(session, sessionId), 450);
   }
-
   private async enterSettings(session: AppSession, sessionId: string) {
-    const ctx = this.ctx(sessionId);
-    ctx.state.currentState = "settings";
-    const saveTxt = ctx.state.saveForQA ? "enabled" : "disabled";
-    await this.queueTTS(
-      session,
-      sessionId,
-      `Settings. Photo saving is ${saveTxt}. Say 'toggle photos' or 'back to compressions'.`
-    );
+    const c = this.ctx(sessionId);
+    c.state.currentState = "settings";
+    const saveTxt = c.state.saveForQA ? "enabled" : "disabled";
+    await this.queueTTS(session, sessionId, `Settings. Photo saving is ${saveTxt}. Say “back to compressions”.`);
   }
 
-  // ---- Transcription router (global “check hands” and robust finals)
+  private async changeBPM(session: AppSession, sessionId: string) {
+    const c = this.ctx(sessionId);
+    const options: BPM[] = [100, 110, 120];
+    const idx = options.indexOf(c.state.metronomeBPM);
+    c.state.metronomeBPM = options[(idx + 1) % options.length];
+
+    this.stopMetronome(sessionId);
+    await this.stopAllAudio(session);
+    this.startMetronome(session, sessionId);
+    await session.audio.speak(`Metronome changed to ${c.state.metronomeBPM} beats per minute.`);
+  }
+
+  // Router
   private installTranscriptionRouter(session: AppSession, sessionId: string) {
-    const unsub = session.events.onTranscription(async (data) => {
-      const text = normalize(data?.text || "");
-      const final = isFinalFlag(data?.isFinal);
-      if (!final) return;
+    const unsub = session.events.onTranscription(async (data: any) => {
+      if (!isFinal(data?.isFinal)) return;
+      const text = data?.text || "";
+      const c = this.ctx(sessionId);
 
-      const ctx = this.ctx(sessionId);
-      session.logger.info(`ASR: state=${ctx.state.currentState} text="${text}"`);
+      session.logger.info(`ASR final: "${text}" (state=${c.state.currentState})`);
+      const nlu = await classifyIntent(text, c.state.currentState);
+      session.logger.info(`NLU intent: ${nlu.intent}`);
 
-      // Global: restart
-      if (text.includes("start") && text.includes("rescue")) {
+      // Globals
+      if (nlu.intent === "START") {
         await this.stopAllAudio(session);
         this.stopMetronome(sessionId);
-        ctx.state = {
-          ...createInitialState(),
-          metronomeBPM: ctx.state.metronomeBPM,
-          saveForQA: ctx.state.saveForQA,
-        };
+        c.state = { ...initialState(), metronomeBPM: c.state.metronomeBPM, saveForQA: c.state.saveForQA };
         await this.enterSafetyCheck(session, sessionId);
         return;
       }
-
-      // Global: emergency confirm
-      if (text.includes("emergency") && text.includes("called")) {
-        ctx.state.emergencyConfirmed = true;
+      if (nlu.intent === "EMERGENCY_CALLED") {
+        c.state.emergencyConfirmed = true;
         await this.queueTTS(session, sessionId, "Emergency services called. Now check if the person is responsive.");
-        setTimeout(() => this.enterResponsivenessCheck(session, sessionId), 1200);
+        setTimeout(() => this.enterResponsiveness(session, sessionId), 1000);
         return;
       }
-
-      // Global: “check hands”
-      if (RE_CHECK_HANDS.test(text)) {
-        if (ctx.state.currentState !== "compressions") {
+      if (nlu.intent === "CHECK_HANDS") {
+        if (c.state.currentState !== "compressions") {
           await this.queueTTS(session, sessionId, "Starting compressions, then I’ll check hand position.");
           await this.enterCompressions(session, sessionId);
-          setTimeout(() => this.captureAndAnalyzeHands(session, sessionId), 300);
+          setTimeout(() => this.captureHandsPhoto(session, sessionId), 300);
         } else {
-          await this.captureAndAnalyzeHands(session, sessionId);
+          await this.captureHandsPhoto(session, sessionId);
         }
         return;
       }
 
-      // State-specific intents
-      switch (ctx.state.currentState) {
+      // State-specific
+      switch (c.state.currentState) {
         case "welcome": {
-          if (text.includes("start") && text.includes("rescue")) {
-            await this.enterSafetyCheck(session, sessionId);
-          }
+          // Any utterance after welcome moves to safety check
+          await this.enterSafetyCheck(session, sessionId);
           break;
         }
         case "safety_check": {
-          if (text.includes("yes") && text.includes("good")) {
+          if (nlu.intent === "CONFIRM_SAFETY") {
             await this.queueTTS(session, sessionId, "Scene is safe. Proceeding to check responsiveness.");
-            setTimeout(() => this.enterResponsivenessCheck(session, sessionId), 1000);
-          } else if (text.includes("not") && text.includes("good")) {
-            await this.enterEmergencyWait(session, sessionId);
+            setTimeout(() => this.enterResponsiveness(session, sessionId), 800);
+          } else if (nlu.intent === "HAZARD_PRESENT") {
+            await this.queueTTS(
+              session,
+              sessionId,
+              "Emergency! Call 911 immediately. Tell me when emergency is called."
+            );
+          } else {
+            await this.queueTTS(session, sessionId, "Is the scene safe or not?");
           }
           break;
         }
         case "responsiveness_check": {
-          if (text.includes("yes") && text.includes("responding")) {
+          if (nlu.intent === "RESPONSIVE_YES") {
             await this.queueTTS(session, sessionId, "Good. Monitor them and call for help if needed.");
-            setTimeout(() => this.enterSafetyCheck(session, sessionId), 1500);
-          } else if (text.includes("no") && text.includes("response") || text.includes("not responding")) {
+            await this.enterSafetyCheck(session, sessionId);
+          } else if (nlu.intent === "RESPONSIVE_NO") {
             await this.queueTTS(session, sessionId, "No response detected. Starting CPR compressions now.");
-            setTimeout(() => this.enterCompressions(session, sessionId), 1200);
+            setTimeout(() => this.enterCompressions(session, sessionId), 800);
+          } else {
+            await this.queueTTS(session, sessionId, "Did they respond or not?");
           }
           break;
         }
         case "compressions": {
-          if (text.includes("change") && text.includes("speed")) {
-            await this.cycleBPM(session, sessionId);
-          } else if (text.includes("settings")) {
+          if (nlu.intent === "CHANGE_BPM") {
+            await this.changeBPM(session, sessionId);
+          } else if (nlu.intent === "OPEN_SETTINGS") {
             await this.enterSettings(session, sessionId);
+          } else {
+            // keep compressions
           }
           break;
         }
         case "settings": {
-          if (text.includes("toggle") && text.includes("photos")) {
-            ctx.state.saveForQA = !ctx.state.saveForQA;
-            await session.audio.speak(`Photo saving ${ctx.state.saveForQA ? "enabled" : "disabled"}.`);
-            await this.enterSettings(session, sessionId);
-          } else if (text.includes("back") && text.includes("compressions")) {
+          if (nlu.intent === "BACK_TO_COMPRESSIONS") {
             await this.enterCompressions(session, sessionId);
+          } else {
+            await this.queueTTS(session, sessionId, "Say “back to compressions”.");
           }
           break;
         }
       }
     });
-
     this.addSub(sessionId, unsub);
   }
 
-  // ---- Settings / BPM
-  private async cycleBPM(session: AppSession, sessionId: string) {
-    const ctx = this.ctx(sessionId);
-    const options: BPM[] = [100, 110, 120];
-    const idx = options.indexOf(ctx.state.metronomeBPM);
-    ctx.state.metronomeBPM = options[(idx + 1) % options.length];
-
-    this.stopMetronome(sessionId);
-    await this.stopAllAudio(session);
-    this.startMetronome(session, sessionId);
-    await session.audio.speak(`Metronome changed to ${ctx.state.metronomeBPM} beats per minute.`);
-  }
-
-  // ---- Lifecycle
+  // Lifecycle
   protected async onSession(session: AppSession, sessionId: string, userId: string): Promise<void> {
-    session.logger.info(`Rescue CPR session started: ${sessionId} for user ${userId}`);
-
-    this.contexts.set(sessionId, {
-      state: createInitialState(),
+    this.ctxMap.set(sessionId, {
+      state: initialState(),
       unsubscribes: [],
       ttsQueue: [],
       ttsPlaying: false,
     });
 
-    session.logger.info(
-      `Capabilities: camera=${String(session.capabilities?.hasCamera)} privateSpeaker=${String(session.capabilities?.speaker?.isPrivate)}`
-    );
+    const caps = `camera=${String(session.capabilities?.hasCamera)} privateSpeaker=${String(
+      session.capabilities?.speaker?.isPrivate
+    )}`;
+    session.logger.info(`Capabilities: ${caps}`);
 
-    // Settings adoption (optional)
+    // Optional settings wire-up
     try {
-      const bpm = session.settings.get<number>(SETTING_METRONOME_BPM, 110);
-      const save = session.settings.get<boolean>(SETTING_SAVE_FOR_QA, false);
       const ctx = this.ctx(sessionId);
+      const bpm = session.settings.get<number>(SETTING_METRONOME_BPM, 110);
+      const save = session.settings.get<boolean>(SETTING_SAVE_FOR_QA, true);
       ctx.state.metronomeBPM = (bpm === 100 || bpm === 110 || bpm === 120 ? bpm : 110) as BPM;
-      ctx.state.saveForQA = Boolean(save);
+      ctx.state.saveForQA = !!save;
 
       const unsubBpm = session.events.onSettingChange<number>(SETTING_METRONOME_BPM, (val) => {
         if (val === 100 || val === 110 || val === 120) {
@@ -521,34 +548,33 @@ class RescueApp extends AppServer {
       session.logger.warn("Settings manager not available or misconfigured.");
     }
 
-    // Router
+    // Router + welcome
     this.installTranscriptionRouter(session, sessionId);
+    await this.enterWelcome(session, sessionId);
 
-    // Disconnect cleanup
+    // Clean-up on disconnect
     const unsubDisc = session.events.onDisconnected(async (reason) => {
       session.logger.info(`Session ${sessionId} disconnected: ${reason}`);
       await this.stopAllAudio(session);
       this.stopMetronome(sessionId);
-      this.ctx(sessionId).unsubscribes.forEach((u) => { try { u(); } catch {} });
-      this.contexts.delete(sessionId);
+      this.ctx(sessionId).unsubscribes.forEach((u) => {
+        try { u(); } catch {}
+      });
+      this.ctxMap.delete(sessionId);
     });
     this.addSub(sessionId, unsubDisc);
-
-    // Enter welcome
-    await this.enterWelcome(session, sessionId);
   }
 
   protected async onStop(sessionId: string): Promise<void> {
-    const ctx = this.contexts.get(sessionId);
-    if (ctx) {
-      ctx.unsubscribes.forEach((u) => { try { u(); } catch {} });
+    const c = this.ctxMap.get(sessionId);
+    if (c) {
+      c.unsubscribes.forEach((u) => { try { u(); } catch {} });
       this.stopMetronome(sessionId);
-      this.contexts.delete(sessionId);
+      this.ctxMap.delete(sessionId);
     }
   }
 }
 
-// Bootstrap server
 new RescueApp().start().catch((err) => {
-  console.error("Failed to start Rescue app:", err);
+  console.error("Failed to start app:", err);
 });
