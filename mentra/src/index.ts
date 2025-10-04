@@ -51,6 +51,7 @@ type IntentName =
   | "CHANGE_BPM"
   | "OPEN_SETTINGS"
   | "BACK_TO_COMPRESSIONS"
+  | "SHUTDOWN"
   | "UNKNOWN";
 
 interface IntentResult {
@@ -104,10 +105,11 @@ You are an intent classifier for a voice-only CPR coaching app.
 Return ONLY JSON with key "intent" (and optional "meta").
 Valid intent values:
 START, CONFIRM_SAFETY, HAZARD_PRESENT, EMERGENCY_CALLED, RESPONSIVE_YES, RESPONSIVE_NO,
-CHECK_HANDS, CHANGE_BPM, OPEN_SETTINGS, BACK_TO_COMPRESSIONS, UNKNOWN
+CHECK_HANDS, CHANGE_BPM, OPEN_SETTINGS, BACK_TO_COMPRESSIONS, SHUTDOWN, UNKNOWN
 
 Classify by meaning and intent, not keywords.
 If the user is answering whether the person responded, interpret short answers like "yes", "no" accordingly.
+For shutdown commands, recognize: "shutdown", "quit", "exit", "stop app", "close app", "turn off".
 Output must be JSON only (no prose).
 `;
 
@@ -170,6 +172,7 @@ function classifyIntentHeuristic(text: string, state: AppState): IntentResult {
     return { intent: "CHANGE_BPM" };
   if (/\b(settings|open settings|configure)\b/.test(t)) return { intent: "OPEN_SETTINGS" };
   if (/\b(back|resume compressions|go back)\b/.test(t)) return { intent: "BACK_TO_COMPRESSIONS" };
+  if (/\b(shutdown|quit|exit|stop app|close app|turn off)\b/.test(t)) return { intent: "SHUTDOWN" };
 
   return { intent: "UNKNOWN" };
 }
@@ -292,7 +295,7 @@ class RescueApp extends AppServer {
     await this.queueTTS(session, sessionId, "Taking a quick photo to check hand position.");
 
     try {
-      const photo: any = await session.camera.requestPhoto({ size: "small" });
+      const photo: any = await session.camera.requestPhoto({});
       const buf: Buffer = Buffer.isBuffer(photo?.buffer) ? photo.buffer : Buffer.from(photo?.buffer ?? []);
 
       session.logger.info(
@@ -332,7 +335,7 @@ class RescueApp extends AppServer {
         session.logger.info(`Backend unavailable - hands photo saved locally only: ${outPath}`);
       }
     } catch (err) {
-      session.logger.error("Photo capture failed:", err);
+      session.logger.error(`Photo capture failed: ${String(err)}`);
       await this.queueTTS(session, sessionId, "I couldn't take a photo. Keep compressions centered on the chest.");
     }
   }
@@ -341,7 +344,7 @@ class RescueApp extends AppServer {
   private async uploadPhotoToAPI(buffer: Buffer, mimeType: string, sessionId: string): Promise<boolean> {
     try {
       const formData = new FormData();
-      const blob = new Blob([buffer], { type: mimeType });
+      const blob = new Blob([new Uint8Array(buffer)], { type: mimeType });
       formData.append("file", blob, `cpr_${sessionId}_${Date.now()}.jpg`);
       formData.append("user_id", sessionId);
       formData.append("timestamp", new Date().toISOString());
@@ -366,7 +369,7 @@ class RescueApp extends AppServer {
   private async analyzeHandsWithBackend(buffer: Buffer, mimeType: string): Promise<{ position: string; confidence: number }> {
     try {
       const formData = new FormData();
-      const blob = new Blob([buffer], { type: mimeType });
+      const blob = new Blob([new Uint8Array(buffer)], { type: mimeType });
       formData.append("file", blob, `hands_${Date.now()}.jpg`);
 
       const response = await fetch("http://localhost:8000/analyze-hands", {
@@ -465,6 +468,15 @@ class RescueApp extends AppServer {
         this.stopMetronome(sessionId);
         c.state = { ...initialState(), metronomeBPM: c.state.metronomeBPM, saveForQA: c.state.saveForQA };
         await this.enterSafetyCheck(session, sessionId);
+        return;
+      }
+      if (nlu.intent === "SHUTDOWN") {
+        await this.stopAllAudio(session);
+        this.stopMetronome(sessionId);
+        await this.queueTTS(session, sessionId, "Shutting down the CPR app. Goodbye.");
+        setTimeout(() => {
+          process.exit(0);
+        }, 2000);
         return;
       }
       if (nlu.intent === "EMERGENCY_CALLED") {
@@ -601,6 +613,50 @@ class RescueApp extends AppServer {
   }
 }
 
-new RescueApp().start().catch((err) => {
+// Graceful shutdown handling
+const app = new RescueApp();
+
+// Handle process termination signals
+process.on('SIGINT', async () => {
+  console.log('\nReceived SIGINT, shutting down gracefully...');
+  await gracefulShutdown();
+});
+
+process.on('SIGTERM', async () => {
+  console.log('\nReceived SIGTERM, shutting down gracefully...');
+  await gracefulShutdown();
+});
+
+process.on('SIGUSR2', async () => {
+  console.log('\nReceived SIGUSR2 (nodemon restart), shutting down gracefully...');
+  await gracefulShutdown();
+});
+
+async function gracefulShutdown() {
+  try {
+    console.log('Stopping app server...');
+    await app.stop();
+    console.log('App stopped successfully');
+    process.exit(0);
+  } catch (error) {
+    console.error('Error during shutdown:', error);
+    process.exit(1);
+  }
+}
+
+// Handle uncaught exceptions
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught Exception:', error);
+  gracefulShutdown().then(() => process.exit(1));
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+  gracefulShutdown().then(() => process.exit(1));
+});
+
+// Start the app
+app.start().catch((err) => {
   console.error("Failed to start app:", err);
+  process.exit(1);
 });
