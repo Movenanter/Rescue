@@ -33,7 +33,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-MODEL_PATH = "../new/models/cpr_model.keras"  # adjust path as needed
+MODEL_PATH = "./cpr_model.keras"  # adjust path as needed
 cnn_model = None
 mp_pose = None
 pose_detector = None
