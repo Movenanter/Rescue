@@ -3,8 +3,6 @@ import {
   TrendingUp, 
   Activity, 
   Heart,
-  Target,
-  Zap,
   Timer
 } from 'lucide-react'
 import { CPRSession } from '@/types/session'

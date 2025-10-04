@@ -44,9 +44,35 @@ export interface CPRSession {
 export interface User {
   id: string
   name: string
+  email: string
+  phone?: string
+  emergencyContact?: {
+    name: string
+    email: string
+    phone: string
+    relationship: string
+  }
+  organization?: string
+  role?: string
+  avatar?: string
   rating: number
   isCprCertified: boolean
   certificationExpiry?: Date
+  trainingHistory?: {
+    totalSessions: number
+    lastSession?: Date
+    averageScore: number
+  }
+  preferences?: {
+    emailNotifications: boolean
+    smsNotifications: boolean
+    language: 'en' | 'es' | 'fr'
+    theme: 'light' | 'dark' | 'auto'
+    metronomeEnabled: boolean
+    voiceCoaching: boolean
+  }
+  createdAt: Date
+  updatedAt: Date
 }
 
 export interface AfterActionReport {
