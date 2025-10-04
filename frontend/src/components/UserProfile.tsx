@@ -1,4 +1,5 @@
 import React, { useState } from 'react'
+import { Link } from 'react-router-dom'
 import { 
   ChevronDown, 
   Star,
@@ -62,10 +63,13 @@ const UserProfile: React.FC<UserProfileProps> = ({ className = '' }) => {
       {isDropdownOpen && (
         <div className="absolute right-0 top-full mt-2 w-48 bg-gray-900 rounded-lg border border-gray-700 shadow-lg z-50">
           <div className="py-2">
-            <button className="w-full px-4 py-2 text-left text-sm text-gray-300 hover:bg-gray-800 hover:text-white transition-colors flex items-center space-x-2">
+            <Link 
+              to="/profile"
+              className="w-full px-4 py-2 text-left text-sm text-gray-300 hover:bg-gray-800 hover:text-white transition-colors flex items-center space-x-2"
+            >
               <User className="w-4 h-4" />
               <span>Profile Settings</span>
-            </button>
+            </Link>
             <button className="w-full px-4 py-2 text-left text-sm text-gray-300 hover:bg-gray-800 hover:text-white transition-colors flex items-center space-x-2">
               <Settings className="w-4 h-4" />
               <span>Preferences</span>

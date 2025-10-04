@@ -9,7 +9,7 @@ import {
   Wind,
   Hand
 } from 'lucide-react'
-import { SessionStep, Correction } from '@/types/session'
+import { SessionStep } from '@/types/session'
 
 interface TimelineViewProps {
   steps: SessionStep[]

@@ -12,10 +12,9 @@ import {
   ChevronRight,
   Calendar,
   User,
-  BarChart3,
   FileText
 } from 'lucide-react'
-import { AfterActionReport as ReportType, Correction, SessionStep } from '@/types/session'
+import { AfterActionReport as ReportType } from '@/types/session'
 import { exportToPDF } from '@/utils/pdfExport'
 import TimelineView from './TimelineView'
 import PerformanceMetrics from './PerformanceMetrics'
@@ -42,14 +41,6 @@ const AfterActionReport: React.FC<AfterActionReportProps> = ({ report, userName 
     return `${minutes}m ${seconds}s`
   }
 
-  const getSeverityColor = (severity: string) => {
-    switch (severity) {
-      case 'critical': return 'text-red-400'
-      case 'moderate': return 'text-yellow-400'
-      case 'minor': return 'text-blue-400'
-      default: return 'text-gray-400'
-    }
-  }
 
   return (
     <div className="min-h-screen bg-gray-950 text-gray-100">

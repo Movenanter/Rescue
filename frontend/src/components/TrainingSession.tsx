@@ -15,13 +15,13 @@ const TrainingSession: React.FC = () => {
   const [isRunning, setIsRunning] = useState(false)
   const [sessionTime, setSessionTime] = useState(0)
   const [compressionCount, setCompressionCount] = useState(0)
-  const [breathCount, setBreathCount] = useState(0)
+  const [breathCount] = useState(0)
   const [currentRate, setCurrentRate] = useState(0)
   const [currentDepth, setCurrentDepth] = useState(0)
   const [feedback, setFeedback] = useState<string[]>([])
 
   useEffect(() => {
-    let interval: NodeJS.Timeout | null = null
+    let interval: number | null = null
     
     if (isRunning) {
       interval = setInterval(() => {

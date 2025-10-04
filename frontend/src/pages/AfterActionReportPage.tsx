@@ -67,7 +67,7 @@ const AfterActionReportPage: React.FC = () => {
 
   return (
     <div className="min-h-screen bg-gray-950">
-      <div className="sticky top-0 bg-gray-950/95 backdrop-blur-sm border-b border-gray-800 z-10">
+      <div className="sticky top-0 bg-gray-950/95 backdrop-blur-sm border-b border-gray-800 z-50">
         <div className="max-w-7xl mx-auto px-4 py-4">
           <button
             onClick={() => navigate('/')}

@@ -342,7 +342,32 @@ export const mockReport: AfterActionReport = {
 export const mockUser: User = {
   id: 'user-123',
   name: 'Arnold Aldridge',
+  email: 'arnold.aldridge@example.com',
+  phone: '+1 (555) 123-4567',
+  emergencyContact: {
+    name: 'Sarah Aldridge',
+    email: 'sarah.aldridge@example.com',
+    phone: '+1 (555) 987-6543',
+    relationship: 'Wife'
+  },
+  organization: 'Metro Emergency Services',
+  role: 'Paramedic',
   rating: 4.9,
   isCprCertified: true,
-  certificationExpiry: new Date('2026-03-15')
+  certificationExpiry: new Date('2026-03-15'),
+  trainingHistory: {
+    totalSessions: 47,
+    lastSession: new Date('2025-01-15T14:30:00'),
+    averageScore: 87
+  },
+  preferences: {
+    emailNotifications: true,
+    smsNotifications: false,
+    language: 'en',
+    theme: 'dark',
+    metronomeEnabled: true,
+    voiceCoaching: true
+  },
+  createdAt: new Date('2023-06-15T10:00:00'),
+  updatedAt: new Date('2025-01-15T14:30:00')
 }

@@ -6,7 +6,6 @@ import {
   Clock, 
   FileText,
   TrendingUp,
-  Users,
   Calendar,
   ChevronRight
 } from 'lucide-react'
