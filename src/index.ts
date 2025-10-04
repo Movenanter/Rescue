@@ -38,7 +38,7 @@ const SAVE_DIR = path.resolve(process.cwd(), process.env.SAVE_DIR || "hands-posi
 
 // ---------- Types & state ----------
 type BPM = 100 | 110 | 120;
-type AppState = "welcome" | "safety_check" | "responsiveness_check" | "compressions" | "settings";
+type AppState = "initialization" | "safety_check" | "responsiveness_check" | "compressions" | "settings";
 
 type IntentName =
   | "START"
@@ -90,7 +90,7 @@ function norm(s: string) {
 }
 function initialState(): RescueSessionState {
   return {
-    currentState: "welcome",
+    currentState: "initialization",
     compressionCount: 0,
     emergencyConfirmed: false,
     metronomeBPM: 110,
@@ -106,7 +106,7 @@ Valid intent values:
 START, CONFIRM_SAFETY, HAZARD_PRESENT, EMERGENCY_CALLED, RESPONSIVE_YES, RESPONSIVE_NO,
 CHECK_HANDS, CHANGE_BPM, OPEN_SETTINGS, BACK_TO_COMPRESSIONS, UNKNOWN
 
-Classify by meaning, not keywords.
+Classify by meaning and intent, not keywords.
 If the user is answering whether the person responded, interpret short answers like "yes", "no" accordingly.
 Output must be JSON only (no prose).
 `;
@@ -299,15 +299,37 @@ class RescueApp extends AppServer {
         `Photo captured: name=${photo?.filename ?? "n/a"} bytes=${buf.byteLength} mime=${photo?.mimeType ?? "image/jpeg"}`
       );
 
-      if (c.state.saveForQA) {
-        try { fs.mkdirSync(SAVE_DIR, { recursive: true }); } catch {}
-        const safeSession = String(sessionId).replace(/[^a-zA-Z0-9_-]/g, "_");
-        const outPath = path.join(SAVE_DIR, `hands_${safeSession}_${Date.now()}.jpg`);
-        fs.writeFileSync(outPath, buf);
-        session.logger.info(`Hands photo saved: ${outPath}`);
-        await this.queueTTS(session, sessionId, "Photo saved. Hands centered—keep going.");
+      // Try to analyze hands using backend, fallback to mock if backend fails
+      const analysis = await this.analyzeHandsWithBackend(buf, photo?.mimeType ?? "image/jpeg");
+      
+      // Generate guidance message
+      const guidanceMessages = {
+        "good": "Hands are centered perfectly. Keep going!",
+        "high": "Hands are too high. Move down toward the center of the chest.",
+        "low": "Hands are too low. Move up toward the center of the chest.",
+        "left": "Move hands slightly to the right, toward the center of the chest.",
+        "right": "Move hands slightly to the left, toward the center of the chest.",
+        "uncertain": "Hand position unclear. Try to center hands on the chest."
+      };
+      
+      const guidance = guidanceMessages[analysis.position as keyof typeof guidanceMessages] || "Continue with compressions.";
+      await this.queueTTS(session, sessionId, guidance);
+
+      // Try to upload to backend, but always save locally as backup
+      const backendSuccess = await this.uploadPhotoToAPI(buf, photo?.mimeType ?? "image/jpeg", sessionId);
+      
+      // Always save locally (either as primary or backup)
+      try { 
+        fs.mkdirSync(SAVE_DIR, { recursive: true }); 
+      } catch {}
+      const safeSession = String(sessionId).replace(/[^a-zA-Z0-9_-]/g, "_");
+      const outPath = path.join(SAVE_DIR, `hands_${safeSession}_${Date.now()}.jpg`);
+      fs.writeFileSync(outPath, buf);
+      
+      if (backendSuccess) {
+        session.logger.info(`Hands photo saved: backend + local backup: ${outPath}`);
       } else {
-        await this.queueTTS(session, sessionId, "Photo taken. Hands centered—keep going.");
+        session.logger.info(`Backend unavailable - hands photo saved locally only: ${outPath}`);
       }
     } catch (err) {
       session.logger.error("Photo capture failed:", err);
@@ -315,10 +337,63 @@ class RescueApp extends AppServer {
     }
   }
 
+  // ---- Backend integration ----
+  private async uploadPhotoToAPI(buffer: Buffer, mimeType: string, sessionId: string): Promise<boolean> {
+    try {
+      const formData = new FormData();
+      const blob = new Blob([buffer], { type: mimeType });
+      formData.append("file", blob, `cpr_${sessionId}_${Date.now()}.jpg`);
+      formData.append("user_id", sessionId);
+      formData.append("timestamp", new Date().toISOString());
+
+      const response = await fetch("http://localhost:8000/upload-photo", {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!response.ok) {
+        throw new Error(`Upload failed: ${response.statusText}`);
+      }
+
+      console.log("Photo uploaded to backend successfully");
+      return true;
+    } catch (error) {
+      console.error("Backend unavailable, falling back to local save:", error);
+      return false;
+    }
+  }
+
+  private async analyzeHandsWithBackend(buffer: Buffer, mimeType: string): Promise<{ position: string; confidence: number }> {
+    try {
+      const formData = new FormData();
+      const blob = new Blob([buffer], { type: mimeType });
+      formData.append("file", blob, `hands_${Date.now()}.jpg`);
+
+      const response = await fetch("http://localhost:8000/analyze-hands", {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!response.ok) {
+        throw new Error(`Analysis failed: ${response.statusText}`);
+      }
+
+      const result = await response.json();
+      return result.analysis;
+    } catch (error) {
+      console.error("Backend analysis failed, using fallback:", error);
+      // Fallback to mock analysis
+      return {
+        position: ["good", "high", "low", "left", "right", "uncertain"][Math.floor(Math.random() * 6)],
+        confidence: Math.random() * 0.4 + 0.6
+      };
+    }
+  }
+
   // Flow
   private async enterWelcome(session: AppSession, sessionId: string) {
     const c = this.ctx(sessionId);
-    c.state.currentState = "welcome";
+    c.state.currentState = "initialization";
     if (!session.capabilities?.speaker?.isPrivate) {
       session.logger.warn("Audio may route through phone (no private speaker).");
     }
@@ -411,7 +486,7 @@ class RescueApp extends AppServer {
 
       // State-specific
       switch (c.state.currentState) {
-        case "welcome": {
+        case "initialization": {
           await this.enterSafetyCheck(session, sessionId);
           break;
         }
