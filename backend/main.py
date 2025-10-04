@@ -53,15 +53,57 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-MODEL_PATH = "./cpr_model.keras"  # adjust path as needed
+# Prefer a TensorFlow Lite model if present; fall back to Keras
+MODEL_TFLITE_PATH = "./cpr_model.tflite"
+MODEL_KERAS_PATH = "./cpr_model.keras"
 cnn_model = None
 mp_pose = None
 pose_detector = None
 
+class TFLitePredictor:
+    """Wrapper to mimic Keras .predict() using tf.lite.Interpreter."""
+    def __init__(self, model_path: str):
+        self.interpreter = tf.lite.Interpreter(model_path=model_path)
+        self.interpreter.allocate_tensors()
+        self.input_details = self.interpreter.get_input_details()
+        self.output_details = self.interpreter.get_output_details()
+        # Assume single input/output
+        self.input_index = self.input_details[0]["index"]
+        self.output_index = self.output_details[0]["index"]
+        self.input_dtype = self.input_details[0]["dtype"]
+        # (scale, zero_point) for quantized models; may be (0.0, 0)
+        self.quant_params = self.input_details[0].get("quantization", (0.0, 0))
+
+    def predict(self, x: np.ndarray, verbose: int = 0) -> np.ndarray:
+        # x is expected to be batched: (N,H,W,C) float32 in [0,1]
+        arr = x
+        if self.input_dtype == np.uint8:
+            scale, zero_point = self.quant_params
+            if scale and scale > 0:
+                arr = np.clip(np.round(arr / scale + zero_point), 0, 255).astype(np.uint8)
+            else:
+                arr = arr.astype(np.uint8)
+        else:
+            arr = arr.astype(np.float32)
+        # Ensure input shape matches; avoid realloc if already correct
+        if tuple(self.input_details[0]["shape"]) != tuple(arr.shape):
+            self.interpreter.resize_tensor_input(self.input_index, arr.shape, strict=False)
+            self.interpreter.allocate_tensors()
+        self.interpreter.set_tensor(self.input_index, arr)
+        self.interpreter.invoke()
+        out = self.interpreter.get_tensor(self.output_index)
+        return out
+
 try:
-    # Load CNN model
-    cnn_model = tf.keras.models.load_model(MODEL_PATH)
-    logger.info(f"Loaded CNN model from {MODEL_PATH}")
+    # Load ML model
+    if os.path.exists(MODEL_TFLITE_PATH):
+        cnn_model = TFLitePredictor(MODEL_TFLITE_PATH)
+        logger.info(f"Loaded TFLite model from {MODEL_TFLITE_PATH}")
+    elif os.path.exists(MODEL_KERAS_PATH):
+        cnn_model = tf.keras.models.load_model(MODEL_KERAS_PATH)
+        logger.info(f"Loaded Keras model from {MODEL_KERAS_PATH}")
+    else:
+        logger.warning("No model file found (cpr_model.tflite or cpr_model.keras). CNN features will be disabled.")
     
     # Initialize MediaPipe
     mp_pose = mp.solutions.pose
