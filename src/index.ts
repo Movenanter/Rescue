@@ -12,13 +12,21 @@ if (!MENTRAOS_API_KEY) {
   process.exit(1);
 }
 
-// Metronome
-const TICK_URL =
-  (process.env.TICK_URL ||
-    "https://cdn.pixabay.com/audio/2022/03/24/audio_719bb3b0e5.mp3").trim();
-const TICK_VOLUME = Math.min(1, Math.max(0, Number(process.env.TICK_VOLUME || "0.5")));
+// ---------- Metronome config (use external short beep URL) ----------
+const TICK_URL = (
+  process.env.TICK_URL ||
+  // second link: Google Actions short beep (about ~200ms)
+  "https://actions.google.com/sounds/v1/alarms/beep_short.ogg"
+).trim();
 
-// Gemini 2.5
+const TICK_VOLUME = Math.min(1, Math.max(0, Number(process.env.TICK_VOLUME || "0.5")));
+const AUDIO_LEAD_MS = Math.max(0, Number(process.env.AUDIO_LEAD_MS || "20")); // fire slightly early
+const PREWARM = (process.env.PREWARM || "1") === "1"; // warm decoder to avoid first-beat lag
+
+// ---------- TTS config ----------
+const TTS_SPEED = Math.max(0.5, Math.min(2.0, Number(process.env.TTS_SPEED || "1.1"))); // default 1.1x
+
+// ---------- Gemini 2.5 (optional NLU) ----------
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 const GEMINI_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
@@ -57,8 +65,8 @@ interface RescueSessionState {
   metronomeBPM: BPM;
   saveForQA: boolean;
 
-  speechGuardUntil?: number;       // pause ticks while TTS is speaking
-  metronomeTimer?: NodeJS.Timeout; // setInterval handle
+  speechGuardUntil?: number;       // voice prompts only (NEVER pauses beats)
+  metronomeTimer?: NodeJS.Timeout; // setTimeout handle
 }
 
 interface SessionContext {
@@ -99,9 +107,7 @@ START, CONFIRM_SAFETY, HAZARD_PRESENT, EMERGENCY_CALLED, RESPONSIVE_YES, RESPONS
 CHECK_HANDS, CHANGE_BPM, OPEN_SETTINGS, BACK_TO_COMPRESSIONS, UNKNOWN
 
 Classify by meaning, not keywords.
-
 If the user is answering whether the person responded, interpret short answers like "yes", "no" accordingly.
-
 Output must be JSON only (no prose).
 `;
 
@@ -112,9 +118,7 @@ async function classifyIntentWithGemini(
   if (!GEMINI_API_KEY) return null;
   try {
     const prompt =
-      `${INTENT_SYSTEM_PROMPT}\n` +
-      `Context state: ${contextState}\n` +
-      `Utterance: ${utterance}\n`;
+      `${INTENT_SYSTEM_PROMPT}\nContext state: ${contextState}\nUtterance: ${utterance}\n`;
 
     const body = {
       contents: [{ role: "user", parts: [{ text: prompt }]}],
@@ -142,65 +146,27 @@ async function classifyIntentWithGemini(
 function classifyIntentHeuristic(text: string, state: AppState): IntentResult {
   const t = norm(text);
 
-  // State-aware shortcuts for responsiveness_check
   if (state === "responsiveness_check") {
-    // clear negatives
-    if (
-      /\b(no|nope|nah|negative)\b/.test(t) ||
-      /(did\s*(not|n't)\s*respond)/.test(t) ||
-      /\b(not\s*respond(ing)?)\b/.test(t) ||
-      /\bunresponsive\b/.test(t)
-    ) {
+    if (/\b(no|nope|nah|negative)\b/.test(t) || /(did\s*(not|n't)\s*respond)/.test(t) || /\b(not\s*respond(ing)?)\b/.test(t) || /\bunresponsive\b/.test(t)) {
       return { intent: "RESPONSIVE_NO" };
     }
-    // clear positives
-    if (
-      /\b(yes|yeah|yep|affirmative|they did respond|they responded|they answered|responding)\b/.test(t)
-    ) {
+    if (/\b(yes|yeah|yep|affirmative|they did respond|they responded|they answered|responding)\b/.test(t)) {
       return { intent: "RESPONSIVE_YES" };
     }
   }
 
-  // Hazards first (strong signal)
-  if (/\b(not\s+safe|unsafe|hazard|danger|risky|not\s+clear)\b/.test(t)) {
-    return { intent: "HAZARD_PRESENT" };
-  }
-
-  // Start
+  if (/\b(not\s+safe|unsafe|hazard|danger|risky|not\s+clear)\b/.test(t)) return { intent: "HAZARD_PRESENT" };
   if (/\b(start(ing)?|begin|start over|again)\b/.test(t)) return { intent: "START" };
-
-  // Safety confirmations (broad phrasing)
-  if (
-    /\b(it'?s\s+safe|safe|all\s+clear|clear|it'?s\s+ok(ay)?|we('?re)?\s+good|good\s+to\s+go|looks\s+fine|should\s+be\s+safe|seems\s+safe)\b/.test(
-      t
-    )
-  ) {
+  if (/\b(it'?s\s+safe|safe|all\s+clear|clear|it'?s\s+ok(ay)?|we('?re)?\s+good|good\s+to\s+go|looks\s+fine|should\s+be\s+safe|seems\s+safe)\b/.test(t))
     return { intent: "CONFIRM_SAFETY" };
-  }
-
-  // Emergency called
-  if (/(i|we).*(called|dialed).*(911|emergency)|\b(911|emergency)\b.*(called|on the line)/.test(t)) {
+  if (/(i|we).*(called|dialed).*(911|emergency)|\b(911|emergency)\b.*(called|on the line)/.test(t))
     return { intent: "EMERGENCY_CALLED" };
-  }
-
-  // Generic responsiveness (outside explicit state)
-  if (/\b(responding|they answered|they'?re ok|they'?re okay|responsive|came to)\b/.test(t)) {
+  if (/\b(responding|they answered|they'?re ok|they'?re okay|responsive|came to)\b/.test(t))
     return { intent: "RESPONSIVE_YES" };
-  }
-  if (
-    /\b(no response|not responding|unresponsive|won'?t wake|isn'?t waking)\b/.test(t) ||
-    /(did\s*(not|n't)\s*respond)/.test(t)
-  ) {
+  if (/\b(no response|not responding|unresponsive|won'?t wake|isn'?t waking)\b/.test(t) || /(did\s*(not|n't)\s*respond)/.test(t))
     return { intent: "RESPONSIVE_NO" };
-  }
-
-  // Hands / speed / settings / back
   if (/\b(check|center|hands|position|placement)\b/.test(t)) return { intent: "CHECK_HANDS" };
-  if (
-    /\b(change.*(speed|bpm)|speed\s*up|slow\s*down|faster|slower|increase\s*speed|decrease\s*speed)\b/.test(
-      t
-    )
-  )
+  if (/\b(change.*(speed|bpm)|speed\s*up|slow\s*down|faster|slower|increase\s*speed|decrease\s*speed)\b/.test(t))
     return { intent: "CHANGE_BPM" };
   if (/\b(settings|open settings|configure)\b/.test(t)) return { intent: "OPEN_SETTINGS" };
   if (/\b(back|resume compressions|go back)\b/.test(t)) return { intent: "BACK_TO_COMPRESSIONS" };
@@ -209,19 +175,14 @@ function classifyIntentHeuristic(text: string, state: AppState): IntentResult {
 }
 
 async function classifyIntent(text: string, state: AppState): Promise<IntentResult> {
-  // Try Gemini first, state provided
   const gem = await classifyIntentWithGemini(text, state);
   if (gem && gem.intent && gem.intent !== "UNKNOWN") return gem;
-
-  // Then robust state-aware heuristics
-  const heur = classifyIntentHeuristic(text, state);
-  return heur;
+  return classifyIntentHeuristic(text, state);
 }
 
 // ---------- App ----------
 class RescueApp extends AppServer {
   private ctxMap = new Map<string, SessionContext>();
-  private tickInFlight = new Map<string, boolean>();
 
   constructor() {
     super({ packageName: PACKAGE_NAME, apiKey: MENTRAOS_API_KEY!, port: PORT });
@@ -237,7 +198,7 @@ class RescueApp extends AppServer {
     this.addCleanupHandler(unsub);
   }
 
-  // TTS queue
+  // TTS queue (does NOT pause metronome)
   private async queueTTS(session: AppSession, sessionId: string, msg: string) {
     const c = this.ctx(sessionId);
     c.ttsQueue.push(msg);
@@ -245,15 +206,12 @@ class RescueApp extends AppServer {
   }
   private async playNext(session: AppSession, sessionId: string): Promise<void> {
     const c = this.ctx(sessionId);
-    if (c.ttsQueue.length === 0) {
-      c.ttsPlaying = false;
-      return;
-    }
+    if (c.ttsQueue.length === 0) { c.ttsPlaying = false; return; }
     c.ttsPlaying = true;
     const msg = c.ttsQueue.shift()!;
     try {
-      c.state.speechGuardUntil = Date.now() + 2200;
-      const r = await session.audio.speak(msg, { voice_settings: { speed: 1 } });
+      c.state.speechGuardUntil = Date.now() + 2200; // info only
+      const r = await session.audio.speak(msg, { voice_settings: { speed: TTS_SPEED } });
       if (!r.success) session.logger.error("TTS failed");
     } catch (e) {
       session.logger.error("TTS exception: " + String(e));
@@ -264,36 +222,36 @@ class RescueApp extends AppServer {
     try { await session.audio.stopAudio(); } catch {}
   }
 
-  // Metronome
-  private async tick(session: AppSession, sessionId: string) {
-    if (this.tickInFlight.get(sessionId)) return;
-    this.tickInFlight.set(sessionId, true);
-    try {
-      const res = await session.audio.playAudio({ audioUrl: TICK_URL, volume: TICK_VOLUME });
-      if (!res?.success) {
-        await session.audio.speak("tick", { voice_settings: { speed: 1.2 } });
-      }
-    } catch {
-      try { await session.audio.speak("tick", { voice_settings: { speed: 1.2 } }); } catch {}
-    } finally {
-      this.tickInFlight.set(sessionId, false);
-    }
+  // ---- Metronome (EVERY beat; drift-corrected; lead; prewarm; non-blocking audio) ----
+  private fireTick(session: AppSession) {
+    // Fire-and-forget so long files can’t stall the scheduler.
+    session.audio.playAudio({ audioUrl: TICK_URL, volume: TICK_VOLUME })
+      .then(res => { if (!res?.success) return session.audio.speak("t", { voice_settings: { speed: TTS_SPEED } }); })
+      .catch(() => session.audio.speak("t", { voice_settings: { speed: TTS_SPEED } }).catch(() => {}));
   }
+
   private startMetronome(session: AppSession, sessionId: string) {
     const c = this.ctx(sessionId);
     const period = Math.round(60000 / c.state.metronomeBPM);
     this.stopMetronome(sessionId);
 
-    session.logger.info(`Metronome start @ ${c.state.metronomeBPM} BPM`);
-    this.tickInFlight.set(sessionId, false);
+    session.logger.info(
+      `Metronome start @ ${c.state.metronomeBPM} BPM (lead=${AUDIO_LEAD_MS}ms, prewarm=${PREWARM}, url=${TICK_URL})`
+    );
 
-    c.state.metronomeTimer = setInterval(async () => {
-      if (c.state.speechGuardUntil && Date.now() < c.state.speechGuardUntil) return;
-      if (this.tickInFlight.get(sessionId)) return;
+    // Optional low-volume prewarm
+    if (PREWARM) {
+      session.audio.playAudio({ audioUrl: TICK_URL, volume: Math.min(0.02, TICK_VOLUME) }).catch(() => {});
+    }
 
-      c.state.compressionCount++;
-      await this.tick(session, sessionId);
+    let expected = Date.now() + period;
 
+    const step = () => {
+      expected += period;                 // theoretical next beat
+
+      this.fireTick(session);             // fire THIS beat (never skipped)
+
+      c.state.compressionCount++;         // counts (do not block beats)
       if (c.state.compressionCount % 10 === 0) {
         c.state.speechGuardUntil = Date.now() + 1100;
         this.queueTTS(session, sessionId, String(c.state.compressionCount));
@@ -302,24 +260,29 @@ class RescueApp extends AppServer {
         c.state.speechGuardUntil = Date.now() + 2200;
         this.queueTTS(session, sessionId, "Two minutes completed. Consider reassessing or swapping rescuers.");
       }
-    }, period);
+
+      const nextDelay = Math.max(0, expected - Date.now() - AUDIO_LEAD_MS); // drift-corrected with lead
+      c.state.metronomeTimer = setTimeout(step, nextDelay) as unknown as NodeJS.Timeout;
+    };
+
+    const firstDelay = Math.max(0, expected - Date.now() - AUDIO_LEAD_MS);
+    c.state.metronomeTimer = setTimeout(step, firstDelay) as unknown as NodeJS.Timeout;
   }
+
   private stopMetronome(sessionId: string) {
     const c = this.ctxMap.get(sessionId);
     if (!c) return;
     if (c.state.metronomeTimer) {
-      clearInterval(c.state.metronomeTimer);
+      clearTimeout(c.state.metronomeTimer as unknown as NodeJS.Timeout);
       c.state.metronomeTimer = undefined;
     }
-    this.tickInFlight.set(sessionId, false);
   }
 
-  // ---- Real photo capture + optional local save to SAVE_DIR ----
+  // ---- Photo capture + optional local save to SAVE_DIR ----
   private async captureHandsPhoto(session: AppSession, sessionId: string) {
     const c = this.ctx(sessionId);
 
-    // Briefly gate ticks so TTS/capture announcements are clean
-    c.state.speechGuardUntil = Date.now() + 2500;
+    c.state.speechGuardUntil = Date.now() + 2500; // announcement only
 
     if (!session.capabilities?.hasCamera) {
       await this.queueTTS(session, sessionId, "I can't access a camera on this device, but keep compressions centered.");
@@ -329,14 +292,8 @@ class RescueApp extends AppServer {
     await this.queueTTS(session, sessionId, "Taking a quick photo to check hand position.");
 
     try {
-      // Use a small size for speed during CPR. You can switch to "medium"/"large" if needed.
       const photo: any = await session.camera.requestPhoto({ size: "small" });
-
-      // Normalize to Buffer for Node write.
-      const buf: Buffer =
-        Buffer.isBuffer(photo?.buffer)
-          ? photo.buffer
-          : Buffer.from(photo?.buffer ?? []);
+      const buf: Buffer = Buffer.isBuffer(photo?.buffer) ? photo.buffer : Buffer.from(photo?.buffer ?? []);
 
       session.logger.info(
         `Photo captured: name=${photo?.filename ?? "n/a"} bytes=${buf.byteLength} mime=${photo?.mimeType ?? "image/jpeg"}`
@@ -388,9 +345,10 @@ class RescueApp extends AppServer {
   private async enterCompressions(session: AppSession, sessionId: string) {
     const c = this.ctx(sessionId);
     c.state.currentState = "compressions";
-    c.state.speechGuardUntil = Date.now() + 2200;
+    c.state.speechGuardUntil = Date.now() + 2200; // info only
     await session.audio.speak(
-      `Starting compressions at ${c.state.metronomeBPM} beats per minute. You can say things like “check my hands”, “go faster”, or “open settings”.`
+      `Starting compressions at ${c.state.metronomeBPM} beats per minute.`,
+      { voice_settings: { speed: TTS_SPEED } }
     );
     setTimeout(() => this.startMetronome(session, sessionId), 450);
   }
@@ -410,7 +368,9 @@ class RescueApp extends AppServer {
     this.stopMetronome(sessionId);
     await this.stopAllAudio(session);
     this.startMetronome(session, sessionId);
-    await session.audio.speak(`Metronome changed to ${c.state.metronomeBPM} beats per minute.`);
+    await session.audio.speak(`Metronome changed to ${c.state.metronomeBPM} beats per minute.`, {
+      voice_settings: { speed: TTS_SPEED },
+    });
   }
 
   // Router
@@ -452,7 +412,6 @@ class RescueApp extends AppServer {
       // State-specific
       switch (c.state.currentState) {
         case "welcome": {
-          // Any utterance after welcome moves to safety check
           await this.enterSafetyCheck(session, sessionId);
           break;
         }
@@ -461,11 +420,7 @@ class RescueApp extends AppServer {
             await this.queueTTS(session, sessionId, "Scene is safe. Proceeding to check responsiveness.");
             setTimeout(() => this.enterResponsiveness(session, sessionId), 800);
           } else if (nlu.intent === "HAZARD_PRESENT") {
-            await this.queueTTS(
-              session,
-              sessionId,
-              "Emergency! Call 911 immediately. Tell me when emergency is called."
-            );
+            await this.queueTTS(session, sessionId, "Emergency! Call 911 immediately. Tell me when emergency is called.");
           } else {
             await this.queueTTS(session, sessionId, "Is the scene safe or not?");
           }
@@ -488,8 +443,6 @@ class RescueApp extends AppServer {
             await this.changeBPM(session, sessionId);
           } else if (nlu.intent === "OPEN_SETTINGS") {
             await this.enterSettings(session, sessionId);
-          } else {
-            // keep compressions
           }
           break;
         }
@@ -557,9 +510,7 @@ class RescueApp extends AppServer {
       session.logger.info(`Session ${sessionId} disconnected: ${reason}`);
       await this.stopAllAudio(session);
       this.stopMetronome(sessionId);
-      this.ctx(sessionId).unsubscribes.forEach((u) => {
-        try { u(); } catch {}
-      });
+      this.ctx(sessionId).unsubscribes.forEach((u) => { try { u(); } catch {} });
       this.ctxMap.delete(sessionId);
     });
     this.addSub(sessionId, unsubDisc);
