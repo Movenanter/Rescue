@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { 
   Play, 
@@ -10,12 +10,17 @@ import {
   CheckCircle,
   BookOpen,
   Trophy,
-  ArrowLeft
+  ArrowLeft,
+  Camera,
+  Upload,
+  Loader2
 } from 'lucide-react'
+import { apiService } from '../services/api'
 
 const TrainingSession: React.FC = () => {
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
+  const fileInputRef = useRef<HTMLInputElement>(null)
   const [trialType, setTrialType] = useState<'practice' | 'real'>('practice')
   const [sessionSetupComplete, setSessionSetupComplete] = useState(false)
   const [isRunning, setIsRunning] = useState(false)
@@ -25,6 +30,25 @@ const TrainingSession: React.FC = () => {
   const [currentRate, setCurrentRate] = useState(0)
   const [currentDepth, setCurrentDepth] = useState(0)
   const [feedback, setFeedback] = useState<string[]>([])
+  const [analyzing, setAnalyzing] = useState(false)
+  const [backendConnected, setBackendConnected] = useState(false)
+  const [analysisResults, setAnalysisResults] = useState<any[]>([])
+  
+  // Initialize backend connection check
+  useEffect(() => {
+    const checkBackendConnection = async () => {
+      try {
+        await apiService.healthCheck()
+        setBackendConnected(true)
+        console.log('Backend connected for training session')
+      } catch (error) {
+        setBackendConnected(false)
+        console.warn('Backend not available for training session:', error)
+      }
+    }
+    
+    checkBackendConnection()
+  }, [])
 
   useEffect(() => {
     // Check if trial type was passed via URL params
@@ -67,6 +91,47 @@ const TrainingSession: React.FC = () => {
   const handleStart = () => {
     setIsRunning(true)
     setFeedback(prev => [...prev, 'Session started - begin chest compressions'])
+  }
+
+  const handleImageUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    if (!file) return
+
+    if (!backendConnected) {
+      setFeedback(prev => [...prev, 'AI analysis unavailable - backend not connected'])
+      return
+    }
+
+    setAnalyzing(true)
+    try {
+      const result = await apiService.analyzeHands(file)
+      
+      // Update metrics based on analysis
+      if (result.metrics) {
+        setCurrentDepth(result.metrics.depth_inches)
+        setCurrentRate(result.metrics.quality_percent * 1.2) // Convert quality to approximate rate
+      }
+      
+      // Add feedback
+      const feedbackMessage = result.guidance || result.analysis?.position || 'Analysis complete'
+      setFeedback(prev => [...prev, feedbackMessage])
+      
+      // Store analysis result
+      setAnalysisResults(prev => [...prev, {
+        timestamp: new Date(),
+        result: result
+      }])
+      
+    } catch (error) {
+      console.error('Analysis failed:', error)
+      setFeedback(prev => [...prev, 'Analysis failed - using session metrics'])
+    } finally {
+      setAnalyzing(false)
+    }
+  }
+
+  const triggerImageCapture = () => {
+    fileInputRef.current?.click()
   }
 
   const handlePause = () => {
@@ -243,6 +308,52 @@ const TrainingSession: React.FC = () => {
                     </button>
                   </>
                 )}
+              </div>
+
+              {/* Image Capture Section */}
+              <div className="mt-8 pt-6 border-t border-primary-200">
+                <div className="text-center">
+                  <h3 className="text-lg font-medium text-primary-700 mb-4">AI Analysis Capture</h3>
+                  <div className="flex justify-center space-x-4">
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept="image/*"
+                      capture="environment"
+                      onChange={handleImageUpload}
+                      className="hidden"
+                    />
+                    <button
+                      onClick={triggerImageCapture}
+                      disabled={analyzing || !backendConnected}
+                      className={`flex items-center space-x-2 px-4 py-2 rounded-lg transition-colors ${
+                        backendConnected && !analyzing
+                          ? 'bg-blue-500 text-white hover:bg-blue-600'
+                          : 'bg-gray-400 text-gray-200 cursor-not-allowed'
+                      }`}
+                    >
+                      {analyzing ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <Camera className="w-4 h-4" />
+                      )}
+                      <span className="text-sm font-medium">
+                        {analyzing ? 'Analyzing...' : 'Capture Image'}
+                      </span>
+                    </button>
+                    {backendConnected ? (
+                      <div className="flex items-center space-x-2 text-sm text-green-600">
+                        <div className="w-2 h-2 bg-green-500 rounded-full"></div>
+                        <span>AI Ready</span>
+                      </div>
+                    ) : (
+                      <div className="flex items-center space-x-2 text-sm text-gray-500">
+                        <div className="w-2 h-2 bg-gray-400 rounded-full"></div>
+                        <span>Demo Mode</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
               </div>
             </div>
 

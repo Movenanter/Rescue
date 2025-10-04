@@ -6,3 +6,5 @@ mediapipe==0.10.7
 opencv-python==4.8.1.78
 numpy==1.24.3
 Pillow==10.0.1
+openai==1.3.5
+requests==2.31.0

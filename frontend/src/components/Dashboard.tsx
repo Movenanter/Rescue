@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react'
+import React, { useState, useMemo, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { 
   Activity, 
@@ -7,20 +7,62 @@ import {
   FileText,
   TrendingUp,
   Calendar,
-  ChevronRight
+  ChevronRight,
+  Loader2
 } from 'lucide-react'
 import Header from './Header'
 import TrialTypeSidebar from './TrialTypeSidebar'
 import { mockSessions } from '../data/mockData'
+import { apiService } from '../services/api'
 
 const Dashboard: React.FC = () => {
   const navigate = useNavigate()
   const [selectedTrialType, setSelectedTrialType] = useState<'practice' | 'real' | 'all'>('all')
+  const [sessions, setSessions] = useState(mockSessions) // Fallback to mock data initially
+  const [loading, setLoading] = useState(false)
+  const [backendConnected, setBackendConnected] = useState(false)
   
   const filteredSessions = useMemo(() => {
-    if (selectedTrialType === 'all') return mockSessions
-    return mockSessions.filter(session => session.trialType === selectedTrialType)
-  }, [selectedTrialType])
+    if (selectedTrialType === 'all') return sessions
+    return sessions.filter(session => session.trialType === selectedTrialType)
+  }, [selectedTrialType, sessions])
+
+  // Check backend connection on component mount
+  useEffect(() => {
+    const checkBackendConnection = async () => {
+      try {
+        await apiService.healthCheck()
+        setBackendConnected(true)
+        console.log('Backend connection successful')
+      } catch (error) {
+        setBackendConnected(false)
+        console.warn('Backend connection failed, using mock data:', error)
+      }
+    }
+
+    checkBackendConnection()
+  }, [])
+
+  // Load sessions from backend when connected
+  useEffect(() => {
+    if (backendConnected) {
+      const loadSessions = async () => {
+        setLoading(true)
+        try {
+          const backendSessions = await apiService.getSessions()
+          if (backendSessions.length > 0) {
+            setSessions(backendSessions)
+          }
+        } catch (error) {
+          console.warn('Failed to load sessions from backend:', error)
+        } finally {
+          setLoading(false)
+        }
+      }
+      
+      loadSessions()
+    }
+  }, [backendConnected])
 
   const handleStartSession = (trialType: 'practice' | 'real') => {
     navigate(`/training?trialType=${trialType}`)
@@ -31,8 +73,19 @@ const Dashboard: React.FC = () => {
       <Header />
       <div className="max-w-7xl mx-auto px-4 py-8">
         <div className="mb-8">
-          <h1 className="text-3xl font-bold mb-2">CPR Training Dashboard</h1>
-          <p className="text-primary-600">Track your progress and review performance</p>
+          <div className="flex items-center justify-between mb-2">
+            <h1 className="text-3xl font-bold">CPR Training Dashboard</h1>
+            <div className="flex items-center space-x-2">
+              {loading && <Loader2 className="w-4 h-4 animate-spin text-primary-600" />}
+              <div className={`w-3 h-3 rounded-full ${
+                backendConnected ? 'bg-green-500' : 'bg-red-500'
+              }`} title={backendConnected ? 'Backend Connected' : 'Backend Disconnected'} />
+            </div>
+          </div>
+          <p className="text-primary-600">
+            Track your progress and review performance 
+            {backendConnected ? ' - Live Data' : ' - Demo Mode'}
+          </p>
         </div>
         
         <div className="flex gap-6">
@@ -41,7 +94,7 @@ const Dashboard: React.FC = () => {
             <TrialTypeSidebar 
               selectedType={selectedTrialType}
               onTypeChange={setSelectedTrialType}
-              sessions={mockSessions}
+              sessions={sessions}
               onStartSession={handleStartSession}
               isCollapsed={true}
             />

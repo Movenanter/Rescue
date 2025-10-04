@@ -9,20 +9,40 @@ import cv2
 import numpy as np
 import mediapipe as mp
 import tensorflow as tf
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 import logging
 from datetime import datetime
 from PIL import Image
+from pydantic import BaseModel
+import openai
+import json
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Environment variables
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+# Initialize OpenAI client if API key is provided
+if OPENAI_API_KEY:
+    openai.api_key = OPENAI_API_KEY
+else:
+    logger.warning("OPENAI_API_KEY not found in environment variables")
 
 # Create photos directory
 PHOTOS_DIR = "backend_photos"
 os.makedirs(PHOTOS_DIR, exist_ok=True)
 
 app = FastAPI(title="Rescue CPR Backend", version="2.0.0")
+
+# Pydantic models for API requests/responses
+class SummaryRequest(BaseModel):
+    sessionId: str
+    analysisData: Dict[str, Any]
+
+class SummaryResponse(BaseModel):
+    summary: str
 
 # Enable CORS for glasses communication
 app.add_middleware(
@@ -209,6 +229,61 @@ def generate_guidance(analysis: Dict[str, Any]) -> Dict[str, Any]:
         }
     }
 
+async def generate_cpr_summary(session_id: str, analysis_data: Dict[str, Any]) -> str:
+    """
+    Generate AI-powered summary of CPR session using OpenAI
+    """
+    try:
+        if not OPENAI_API_KEY:
+            return "OpenAI API key not configured. Summary generation unavailable."
+        
+        # Extract key metrics from analysis data
+        total_corrections = analysis_data.get("totalCorrections", 0)
+        critical_errors = analysis_data.get("criticalErrors", 0)
+        performance_score = analysis_data.get("performanceScore", 0)
+        corrections = analysis_data.get("corrections", [])
+        duration_minutes = analysis_data.get("durationMinutes", 0)
+        compression_count = analysis_data.get("totalCompressions", 0)
+        
+        # Build prompt with session data
+        prompt = f"""
+        You are an expert CPR instructor analyzing a training session. Please provide a comprehensive summary based on the following data:
+
+        Session ID: {session_id}
+        Duration: {duration_minutes} minutes
+        Total Compressions: {compression_count}
+        Performance Score: {performance_score}/100
+        Total Corrections: {total_corrections}
+        Critical Errors: {critical_errors}
+
+        Correction Details:
+        {json.dumps(corrections, indent=2) if corrections else "None"}
+
+        Please provide:
+        1. A brief overview of the session performance
+        2. Specific areas that need improvement (if any)
+        3. Strengths demonstrated
+        4. Recommendations for the next training session
+
+        Keep the tone professional and encouraging. Limit to 3-4 paragraphs.
+        """
+        
+        response = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "You are a CPR training expert providing feedback on training sessions."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=500,
+            temperature=0.7
+        )
+        
+        return response.choices[0].message.content.strip()
+        
+    except Exception as e:
+        logger.error(f"Error generating AI summary: {e}")
+        return f"Error generating summary: {str(e)}. Please try again later."
+
 # ============== API ENDPOINTS ==============
 
 @app.get("/")
@@ -321,6 +396,20 @@ async def upload_photo(
     except Exception as e:
         logger.error(f"Error uploading photo: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error uploading photo: {str(e)}")
+
+@app.post("/generate-summary", response_model=SummaryResponse)
+async def generate_summary(request: SummaryRequest):
+    """
+    Generate AI-powered summary of CPR session using OpenAI
+    """
+    try:
+        summary = await generate_cpr_summary(request.sessionId, request.analysisData)
+        
+        return SummaryResponse(summary=summary)
+        
+    except Exception as e:
+        logger.error(f"Error in generate-summary endpoint: {e}")
+        raise HTTPException(status_code=500, detail=f"Error generating summary: {str(e)}")
 
 @app.get("/health")
 async def health_check():

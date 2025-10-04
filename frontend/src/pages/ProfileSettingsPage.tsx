@@ -4,20 +4,33 @@ import { ArrowLeft } from 'lucide-react'
 import ProfileSettings from '@/components/ProfileSettings'
 import { mockUser } from '@/data/mockData'
 import { User } from '@/types/session'
+import { apiService } from '@/services/api'
 
 const ProfileSettingsPage: React.FC = () => {
   const [user, setUser] = useState<User>(mockUser)
 
   const handleSave = async (updatedUser: Partial<User>) => {
-    // In a real app, this would make an API call
-    console.log('Saving updated user data:', updatedUser)
-    
-    // Update local state for now
-    setUser(prev => ({
-      ...prev,
-      ...updatedUser,
-      updatedAt: new Date()
-    }))
+    try {
+      // Try backend API first, fallback to mock data update
+      await apiService.updateUserProfile(user.id, updatedUser)
+      console.log('User profile updated via backend')
+      
+      // Update local state if backend call succeeds
+      setUser(prev => ({
+        ...prev,
+        ...updatedUser,
+        updatedAt: new Date()
+      }))
+    } catch (backendError) {
+      console.warn('Backend update failed, updating locally:', backendError)
+      
+      // Fallback to local update
+      setUser(prev => ({
+        ...prev,
+        ...updatedUser,
+        updatedAt: new Date()
+      }))
+    }
   }
 
   return (

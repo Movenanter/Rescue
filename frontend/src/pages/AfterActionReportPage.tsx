@@ -4,6 +4,7 @@ import { ArrowLeft } from 'lucide-react'
 import AfterActionReport from '@/components/AfterActionReport/AfterActionReport'
 import { AfterActionReport as ReportType } from '@/types/session'
 import { mockReport } from '@/data/mockData'
+import { apiService } from '@/services/api'
 
 const AfterActionReportPage: React.FC = () => {
   const { sessionId } = useParams()
@@ -17,16 +18,41 @@ const AfterActionReportPage: React.FC = () => {
       try {
         setLoading(true)
         
-        // In production, this would be an API call
-        // const response = await fetch(`/api/sessions/${sessionId}/report`)
-        // const data = await response.json()
-        // setReport(data)
+        // Try to get session from backend first, fallback to mock data
+        try {
+          await apiService.getSession(sessionId!)
+          // If backend call succeeds, implement backend session retrieval here
+        } catch (backendError) {
+          console.warn('Backend session retrieval not available:', backendError)
+          // Generate AI summary for mock report if backend is available
+          if (mockReport) {
+            try {
+              const aiSummary = await apiService.generateSummary(sessionId!, {
+                totalCorrections: mockReport.summary.totalCorrections,
+                criticalErrors: mockReport.summary.criticalErrors,
+                performanceScore: mockReport.summary.performanceScore,
+                durationMinutes: Math.round(mockReport.summary.totalDuration / 60000),
+                totalCompressions: mockReport.session.totalCompressions,
+                corrections: mockReport.timeline.flatMap(step => step.corrections || [])
+              })
+              
+              // Update mock report with AI summary
+              const enhancedReport = {
+                ...mockReport,
+                summary: {
+                  ...mockReport.summary,
+                  aiGenerated: aiSummary
+                }
+              }
+              setReport(enhancedReport)
+            } catch (aiError) {
+              console.warn('AI summary generation failed:', aiError)
+              setReport(mockReport)
+            }
+          }
+        }
         
-        // For now, using mock data
-        setTimeout(() => {
-          setReport(mockReport)
-          setLoading(false)
-        }, 1000)
+        setLoading(false)
       } catch (err) {
         setError('Failed to load report')
         setLoading(false)
