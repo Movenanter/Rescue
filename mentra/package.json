@@ -5,7 +5,8 @@
     "scripts": {
       "build": "tsc -p tsconfig.json",
       "start": "bun run dist/index.js",
-      "dev": "bun --watch src/index.ts"
+      "dev": "bun --watch src/index.ts",
+      "install-deps": "bun install"
     },
     "dependencies": {
       "@mentra/sdk": "2.1.18"
