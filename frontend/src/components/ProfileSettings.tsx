@@ -54,6 +54,8 @@ const ProfileSettings: React.FC<ProfileSettingsProps> = ({
   const [activeTab, setActiveTab] = useState<'profile' | 'preferences' | 'security'>('profile')
   const [isDirty, setIsDirty] = useState(false)
   const [showSaveSuccess, setShowSaveSuccess] = useState(false)
+  const [profilePhoto, setProfilePhoto] = useState<string | null>(user.avatar || null)
+  const [photoPreview, setPhotoPreview] = useState<string | null>(null)
 
   const handleProfileChange = (field: string, value: string) => {
     setProfileData(prev => ({
@@ -82,13 +84,50 @@ const ProfileSettings: React.FC<ProfileSettingsProps> = ({
     setIsDirty(true)
   }
 
+  const handlePhotoUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    if (!file) return
+
+    // Validate file type
+    const validTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif']
+    if (!validTypes.includes(file.type)) {
+      alert('Please upload a JPG, PNG, or GIF file.')
+      return
+    }
+
+    // Validate file size (2MB max)
+    const maxSize = 2 * 1024 * 1024 // 2MB
+    if (file.size > maxSize) {
+      alert('File size must be less than 2MB.')
+      return
+    }
+
+    // Create preview URL
+    const reader = new FileReader()
+    reader.onload = (e) => {
+      const result = e.target?.result as string
+      setPhotoPreview(result)
+      setProfilePhoto(result) // Store the data URL
+      setIsDirty(true)
+    }
+    reader.readAsDataURL(file)
+  }
+
+  const handleRemovePhoto = () => {
+    setProfilePhoto(null)
+    setPhotoPreview(null)
+    setIsDirty(true)
+  }
+
   const handleSave = async () => {
     try {
       await onSave({
         ...profileData,
+        avatar: profilePhoto,
         preferences: preferences,
         updatedAt: new Date()
       })
+      setPhotoPreview(null) // Clear preview after save
       setIsDirty(false)
       setShowSaveSuccess(true)
       setTimeout(() => setShowSaveSuccess(false), 3000)
@@ -128,27 +167,27 @@ const ProfileSettings: React.FC<ProfileSettingsProps> = ({
   return (
     <div className={`max-w-4xl mx-auto p-6 ${className}`}>
       <div className="mb-8">
-        <h1 className="text-3xl font-bold text-white mb-2">Profile Settings</h1>
-        <p className="text-gray-400">Manage your account information and preferences</p>
+        <h1 className="text-3xl font-bold text-primary-900 mb-2">Profile Settings</h1>
+        <p className="text-primary-600">Manage your account information and preferences</p>
       </div>
 
       {/* Success banner */}
       {showSaveSuccess && (
-        <div className="mb-6 bg-green-950 border border-green-700 rounded-lg p-4 flex items-center space-x-2">
-          <CheckCircle className="w-5 h-5 text-green-400" />
-          <span className="text-green-400">Profile updated successfully!</span>
+        <div className="mb-6 bg-green-100 border border-green-200 rounded-lg p-4 flex items-center space-x-2">
+          <CheckCircle className="w-5 h-5 text-green-600" />
+          <span className="text-green-700">Profile updated successfully!</span>
         </div>
       )}
 
       {/* Tab Navigation */}
-      <div className="border-b border-gray-700 mb-8">
+      <div className="border-b border-primary-200 mb-8">
         <nav className="flex space-x-8">
           <button
             onClick={() => setActiveTab('profile')}
             className={`py-4 px-1 border-b-2 font-medium text-sm ${
               activeTab === 'profile'
-                ? 'border-blue-400 text-blue-400'
-                : 'border-transparent text-gray-400 hover:text-gray-300 hover:border-gray-600'
+                ? 'border-blue-500 text-blue-600'
+                : 'border-transparent text-primary-600 hover:text-primary-800 hover:border-primary-300'
             }`}
           >
             <div className="flex items-center space-x-2">
@@ -160,8 +199,8 @@ const ProfileSettings: React.FC<ProfileSettingsProps> = ({
             onClick={() => setActiveTab('preferences')}
             className={`py-4 px-1 border-b-2 font-medium text-sm ${
               activeTab === 'preferences'
-                ? 'border-blue-400 text-blue-400'
-                : 'border-transparent text-gray-400 hover:text-gray-300 hover:border-gray-600'
+                ? 'border-blue-500 text-blue-600'
+                : 'border-transparent text-primary-600 hover:text-primary-800 hover:border-primary-300'
             }`}
           >
             <div className="flex items-center space-x-2">
@@ -173,8 +212,8 @@ const ProfileSettings: React.FC<ProfileSettingsProps> = ({
             onClick={() => setActiveTab('security')}
             className={`py-4 px-1 border-b-2 font-medium text-sm ${
               activeTab === 'security'
-                ? 'border-blue-400 text-blue-400'
-                : 'border-transparent text-gray-400 hover:text-gray-300 hover:border-gray-600'
+                ? 'border-blue-500 text-blue-600'
+                : 'border-transparent text-primary-600 hover:text-primary-800 hover:border-primary-300'
             }`}
           >
             <div className="flex items-center space-x-2">
@@ -189,37 +228,73 @@ const ProfileSettings: React.FC<ProfileSettingsProps> = ({
       {activeTab === 'profile' && (
         <div className="space-y-8">
           {/* Avatar Section */}
-          <div className="bg-gray-900 rounded-lg p-6">
-            <h2 className="text-xl font-semibold text-white mb-4">Profile Photo</h2>
+          <div className="bg-white/70 backdrop-blur-sm rounded-lg p-6 border border-primary-200 shadow-lg">
+            <h2 className="text-xl font-semibold text-primary-900 mb-4">Profile Photo</h2>
             <div className="flex items-center space-x-6">
               <div className="relative">
-                <div className="w-20 h-20 bg-gradient-to-br from-gray-600 to-gray-800 rounded-full flex items-center justify-center border-2 border-gray-700">
-                  <User className="w-10 h-10 text-gray-300" />
+                <div className="w-20 h-20 bg-gradient-to-br from-primary-400 to-primary-600 rounded-full flex items-center justify-center border-2 border-primary-200 overflow-hidden shadow-md">
+                  {profilePhoto ? (
+                    <img 
+                      src={photoPreview || profilePhoto} 
+                      alt="Profile" 
+                      className="w-full h-full object-cover"
+                    />
+                  ) : (
+                    <User className="w-10 h-10 text-white" />
+                  )}
                 </div>
-                <button className="absolute bottom-0 right-0 w-6 h-6 bg-blue-600 rounded-full flex items-center justify-center hover:bg-blue-700 transition-colors">
-                  <Camera className="w-3 h-3 text-white" />
+                <input
+                  type="file"
+                  accept="image/*"
+                  onChange={handlePhotoUpload}
+                  className="absolute bottom-0 right-0 w-9 h-9 opacity-0 cursor-pointer"
+                />
+                <button className="absolute bottom-0 right-0 w-9 h-9 bg-blue-600 rounded-full flex items-center justify-center hover:bg-blue-700 transition-colors border-2 border-white pointer-events-none shadow-lg">
+                  <Camera className="w-4 h-4 text-white" />
                 </button>
               </div>
-              <div>
-                <button className="text-blue-400 hover:text-blue-300 font-medium">Change Photo</button>
-                <p className="text-gray-500 text-sm">JPG, PNG or GIF. Max size 2MB.</p>
+              <div className="space-y-2">
+                <div className="flex space-x-2">
+                  <input
+                    type="file"
+                    accept="image/*"
+                    onChange={handlePhotoUpload}
+                    className="hidden"
+                    id="photo-upload"
+                  />
+                  <label
+                    htmlFor="photo-upload"
+                    className="text-blue-600 hover:text-blue-700 font-medium cursor-pointer"
+                  >
+                    Choose Photo
+                  </label>
+                  {profilePhoto && (
+                    <button
+                      onClick={handleRemovePhoto}
+                      className="text-red-600 hover:text-red-700 font-medium cursor-pointer"
+                    >
+                      Remove
+                    </button>
+                  )}
+                </div>
+                <p className="text-primary-500 text-sm">JPG, PNG or GIF. Max size 2MB.</p>
               </div>
             </div>
           </div>
 
           {/* Basic Information */}
-          <div className="bg-gray-900 rounded-lg p-6">
-            <h2 className="text-xl font-semibold text-white mb-6">Basic Information</h2>
+          <div className="bg-white/70 backdrop-blur-sm rounded-lg p-6 border border-primary-200 shadow-lg">
+            <h2 className="text-xl font-semibold text-primary-900 mb-6">Basic Information</h2>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               <div>
-                <label className="block text-sm font-medium text-gray-300 mb-2">Full Name</label>
+                <label className="block text-sm font-medium text-primary-700 mb-2">Full Name</label>
                 <div className="relative">
-                  <User className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-400" />
+                  <User className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-primary-500" />
                   <input
                     type="text"
                     value={profileData.name}
                     onChange={(e) => handleProfileChange('name', e.target.value)}
-                    className="w-full pl-10 pr-4 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-400 focus:border-blue-400 focus:ring-1 focus:ring-blue-400"
+                    className="w-full pl-10 pr-4 py-2 bg-white border border-primary-200 rounded-lg text-primary-900 placeholder-primary-400 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
                   />
                 </div>
               </div>
@@ -558,10 +633,10 @@ const ProfileSettings: React.FC<ProfileSettingsProps> = ({
         <button
           onClick={handleSave}
           disabled={!isDirty}
-          className={`px-6 py-2 rounded-lg font-medium transition-all flex items-center space-x-2 ${
+          className={`px-6 py-2 rounded-lg font-medium transition-all flex items-center space-x-2 shadow-lg ${
             isDirty
               ? 'bg-blue-600 hover:bg-blue-700 text-white'
-              : 'bg-gray-700 text-gray-400 cursor-not-allowed'
+              : 'bg-primary-300 text-primary-400 cursor-not-allowed'
           }`}
         >
           <Save className="w-4 h-4" />

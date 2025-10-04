@@ -52,66 +52,66 @@ const CorrectionsSummary: React.FC<CorrectionsSummaryProps> = ({ corrections, re
 
   const getSeverityIcon = (severity: string) => {
     switch (severity) {
-      case 'critical': return <XCircle className="w-5 h-5 text-red-400" />
-      case 'moderate': return <AlertTriangle className="w-5 h-5 text-yellow-400" />
-      case 'minor': return <AlertCircle className="w-5 h-5 text-blue-400" />
-      default: return <AlertCircle className="w-5 h-5 text-gray-400" />
+      case 'critical': return <XCircle className="w-5 h-5 text-red-600" />
+      case 'moderate': return <AlertTriangle className="w-5 h-5 text-yellow-600" />
+      case 'minor': return <AlertCircle className="w-5 h-5 text-blue-600" />
+      default: return <AlertCircle className="w-5 h-5 text-primary-600" />
     }
   }
 
   return (
     <div className="space-y-6">
-      <div className="bg-gray-900 rounded-2xl p-6 border border-gray-800">
-        <h2 className="text-xl font-semibold mb-6 flex items-center space-x-2">
-          <AlertTriangle className="w-5 h-5 text-yellow-400" />
+      <div>
+        <h2 className="text-xl font-semibold mb-6 flex items-center space-x-2 text-primary-900">
+          <AlertTriangle className="w-5 h-5 text-yellow-600" />
           <span>Corrections Summary</span>
         </h2>
 
         <div className="grid grid-cols-3 gap-4 mb-8">
-          <div className="bg-red-950/20 border border-red-900 rounded-lg p-4">
+          <div className="bg-red-100 border border-red-200 rounded-lg p-4 shadow-sm">
             <div className="flex items-center justify-between">
-              <XCircle className="w-6 h-6 text-red-400" />
-              <span className="text-3xl font-bold text-red-400">{severityCounts.critical || 0}</span>
+              <XCircle className="w-6 h-6 text-red-600" />
+              <span className="text-3xl font-bold text-red-600">{severityCounts.critical || 0}</span>
             </div>
-            <p className="text-sm text-gray-400 mt-2">Critical</p>
+            <p className="text-sm text-primary-600 mt-2">Critical</p>
           </div>
           
-          <div className="bg-yellow-950/20 border border-yellow-900 rounded-lg p-4">
+          <div className="bg-yellow-100 border border-yellow-200 rounded-lg p-4 shadow-sm">
             <div className="flex items-center justify-between">
-              <AlertTriangle className="w-6 h-6 text-yellow-400" />
-              <span className="text-3xl font-bold text-yellow-400">{severityCounts.moderate || 0}</span>
+              <AlertTriangle className="w-6 h-6 text-yellow-600" />
+              <span className="text-3xl font-bold text-yellow-600">{severityCounts.moderate || 0}</span>
             </div>
-            <p className="text-sm text-gray-400 mt-2">Moderate</p>
+            <p className="text-sm text-primary-600 mt-2">Moderate</p>
           </div>
           
-          <div className="bg-blue-950/20 border border-blue-900 rounded-lg p-4">
+          <div className="bg-blue-100 border border-blue-200 rounded-lg p-4 shadow-sm">
             <div className="flex items-center justify-between">
-              <AlertCircle className="w-6 h-6 text-blue-400" />
-              <span className="text-3xl font-bold text-blue-400">{severityCounts.minor || 0}</span>
+              <AlertCircle className="w-6 h-6 text-blue-600" />
+              <span className="text-3xl font-bold text-blue-600">{severityCounts.minor || 0}</span>
             </div>
-            <p className="text-sm text-gray-400 mt-2">Minor</p>
+            <p className="text-sm text-primary-600 mt-2">Minor</p>
           </div>
         </div>
 
         <div className="space-y-4">
           {Object.entries(groupedCorrections).map(([type, typeCorrections]) => (
-            <div key={type} className="bg-gray-800 rounded-xl p-4 border border-gray-700">
+            <div key={type} className="bg-white/70 backdrop-blur-sm rounded-xl p-4 border border-primary-200 shadow-lg">
               <div className="flex items-center justify-between mb-3">
                 <div className="flex items-center space-x-3">
                   <span className="text-2xl">{getCorrectionTypeIcon(type)}</span>
-                  <h3 className="font-medium text-white">{getCorrectionTypeLabel(type)}</h3>
+                  <h3 className="font-medium text-primary-900">{getCorrectionTypeLabel(type)}</h3>
                 </div>
-                <span className="text-sm text-gray-400">{typeCorrections.length} corrections</span>
+                <span className="text-sm text-primary-600">{typeCorrections.length} corrections</span>
               </div>
               
               <div className="space-y-2">
                 {typeCorrections.slice(0, 3).map((correction) => (
-                  <div key={correction.id} className="flex items-start space-x-2 p-2 bg-gray-900 rounded-lg">
+                  <div key={correction.id} className="flex items-start space-x-2 p-2 bg-white/50 rounded-lg backdrop-blur-sm border border-primary-100">
                     {getSeverityIcon(correction.severity)}
                     <div className="flex-1">
-                      <p className="text-sm text-gray-300">{correction.description}</p>
+                      <p className="text-sm text-primary-700">{correction.description}</p>
                       {correction.compressionCount && (
-                        <p className="text-xs text-gray-500 mt-1">
+                        <p className="text-xs text-primary-600 mt-1">
                           Affected {correction.compressionCount} compressions
                         </p>
                       )}
@@ -119,7 +119,7 @@ const CorrectionsSummary: React.FC<CorrectionsSummaryProps> = ({ corrections, re
                   </div>
                 ))}
                 {typeCorrections.length > 3 && (
-                  <p className="text-xs text-gray-500 pl-2">
+                  <p className="text-xs text-primary-600 pl-2">
                     +{typeCorrections.length - 3} more corrections
                   </p>
                 )}
@@ -130,19 +130,19 @@ const CorrectionsSummary: React.FC<CorrectionsSummaryProps> = ({ corrections, re
       </div>
 
       {recommendations.length > 0 && (
-        <div className="bg-gray-900 rounded-2xl p-6 border border-gray-800">
-          <h3 className="text-lg font-semibold mb-4 flex items-center space-x-2">
-            <BookOpen className="w-5 h-5 text-purple-400" />
+        <div className="bg-white/70 backdrop-blur-sm rounded-2xl p-6 border border-primary-200 shadow-lg">
+          <h3 className="text-lg font-semibold mb-4 flex items-center space-x-2 text-primary-900">
+            <BookOpen className="w-5 h-5 text-primary-700" />
             <span>Training Recommendations</span>
           </h3>
           <div className="space-y-3">
             {recommendations.map((recommendation, index) => (
-              <div key={index} className="flex items-start space-x-3 p-3 bg-gray-800 rounded-lg border border-gray-700">
-                <div className="flex-shrink-0 w-8 h-8 bg-purple-950/50 border border-purple-500 rounded-full flex items-center justify-center">
-                  <span className="text-xs font-bold text-purple-400">{index + 1}</span>
+              <div key={index} className="flex items-start space-x-3 p-3 bg-white/50 rounded-lg border border-primary-100 backdrop-blur-sm shadow-sm">
+                <div className="flex-shrink-0 w-8 h-8 bg-purple-100 border border-purple-300 rounded-full flex items-center justify-center">
+                  <span className="text-xs font-bold text-purple-600">{index + 1}</span>
                 </div>
                 <div className="flex-1">
-                  <p className="text-sm text-gray-300">{recommendation}</p>
+                  <p className="text-sm text-primary-700">{recommendation}</p>
                 </div>
               </div>
             ))}
@@ -150,23 +150,23 @@ const CorrectionsSummary: React.FC<CorrectionsSummaryProps> = ({ corrections, re
         </div>
       )}
 
-      <div className="bg-gradient-to-r from-lime-950/20 to-green-950/20 border border-lime-900 rounded-2xl p-6">
-        <h3 className="text-lg font-semibold mb-3 flex items-center space-x-2">
-          <TrendingUp className="w-5 h-5 text-lime-400" />
+      <div className="mt-8 bg-white/70 backdrop-blur-sm rounded-2xl p-6 border border-primary-200 shadow-lg">
+        <h3 className="text-lg font-semibold mb-3 flex items-center space-x-2 text-primary-900">
+          <TrendingUp className="w-5 h-5 text-green-600" />
           <span>Next Steps</span>
         </h3>
         <ul className="space-y-2">
           <li className="flex items-center space-x-2">
-            <ChevronRight className="w-4 h-4 text-lime-400" />
-            <span className="text-sm text-gray-300">Review the timeline to understand when corrections occurred</span>
+            <ChevronRight className="w-4 h-4 text-green-600" />
+            <span className="text-sm text-primary-700">Review the timeline to understand when corrections occurred</span>
           </li>
           <li className="flex items-center space-x-2">
-            <ChevronRight className="w-4 h-4 text-lime-400" />
-            <span className="text-sm text-gray-300">Practice the recommended focus areas in your next session</span>
+            <ChevronRight className="w-4 h-4 text-green-600" />
+            <span className="text-sm text-primary-700">Practice the recommended focus areas in your next session</span>
           </li>
           <li className="flex items-center space-x-2">
-            <ChevronRight className="w-4 h-4 text-lime-400" />
-            <span className="text-sm text-gray-300">Export this report as PDF for your records</span>
+            <ChevronRight className="w-4 h-4 text-green-600" />
+            <span className="text-sm text-primary-700">Export this report as PDF for your records</span>
           </li>
         </ul>
       </div>

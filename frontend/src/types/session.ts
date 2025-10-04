@@ -34,6 +34,7 @@ export interface CPRSession {
   avgCompressionDepth: number
   overallScore: number
   status: 'in_progress' | 'completed' | 'aborted'
+  trialType: 'practice' | 'real'
   certification?: {
     passed: boolean
     score: number
