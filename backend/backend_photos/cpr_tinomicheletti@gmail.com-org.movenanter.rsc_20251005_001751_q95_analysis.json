@@ -1,0 +1,20 @@
+{
+  "analysis": {
+    "position": "no_cpr",
+    "confidence": 0.95,
+    "source": "mentra_glasses"
+  },
+  "guidance": {
+    "instruction": "No CPR in progress.",
+    "all_feedback": [
+      "No CPR in progress."
+    ],
+    "priority": "warning",
+    "metrics": {
+      "quality_percent": 95.0
+    }
+  },
+  "user_id": "tinomicheletti@gmail.com-org.movenanter.rsc",
+  "session_id": null,
+  "timestamp": "2025-10-05T00:17:51.647772"
+}

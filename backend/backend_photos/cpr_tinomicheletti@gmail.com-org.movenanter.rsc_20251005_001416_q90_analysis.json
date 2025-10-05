@@ -1,0 +1,20 @@
+{
+  "analysis": {
+    "position": "good",
+    "confidence": 0.9,
+    "source": "mentra_glasses"
+  },
+  "guidance": {
+    "instruction": "Hands are centered perfectly. Keep going!",
+    "all_feedback": [
+      "Hands are centered perfectly. Keep going!"
+    ],
+    "priority": "good",
+    "metrics": {
+      "quality_percent": 90.0
+    }
+  },
+  "user_id": "tinomicheletti@gmail.com-org.movenanter.rsc",
+  "session_id": null,
+  "timestamp": "2025-10-05T00:14:16.406338"
+}

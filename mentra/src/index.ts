@@ -69,6 +69,7 @@ interface RescueSessionState {
 
   speechGuardUntil?: number;       // voice prompts only (NEVER pauses beats)
   metronomeTimer?: NodeJS.Timeout; // setTimeout handle
+  handCheckTimer?: NodeJS.Timeout; // timer for automatic hand position checks
 }
 
 interface SessionContext {
@@ -288,6 +289,8 @@ class RescueApp extends AppServer {
       clearTimeout(c.state.metronomeTimer as unknown as NodeJS.Timeout);
       c.state.metronomeTimer = undefined;
     }
+    // Also stop hand check timer when stopping metronome
+    this.stopHandCheckTimer(sessionId);
   }
 
   // ---- Photo capture + optional local save to SAVE_DIR ----
@@ -422,7 +425,7 @@ class RescueApp extends AppServer {
         }],
         generationConfig: {
           temperature: 0.0,
-          maxOutputTokens: 5,
+          maxOutputTokens: 500, // Much higher to account for internal thoughts
           topP: 0.1,
           topK: 1,
           // Additional optimizations for Flash model speed
@@ -443,10 +446,13 @@ class RescueApp extends AppServer {
       });
 
       if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`🚨 Gemini API failed: ${response.status} ${response.statusText}`, errorText);
         throw new Error(`Gemini API failed: ${response.statusText}`);
       }
 
       const result = await response.json();
+      console.log('📡 Gemini API response status:', response.status);
       const endTime = Date.now();
       const duration = endTime - startTime;
       
@@ -456,13 +462,26 @@ class RescueApp extends AppServer {
         console.warn(`⚠️ Slow Gemini response: ${duration}ms (consider optimizing)`);
       }
       
+      console.log('🔍 Full Gemini response structure:', JSON.stringify(result, null, 2));
+      
       const rawText = result.candidates?.[0]?.content?.parts?.[0]?.text?.toLowerCase().trim();
+      
+      console.log(`🔍 Raw text extracted: "${rawText}"`);
+      
+      // Handle case where rawText is undefined or null
+      if (!rawText) {
+        console.warn('⚠️ No text found in Gemini response, using fallback');
+        return {
+          position: "uncertain",
+          confidence: 0.1
+        };
+      }
       
       // Extract the first valid position from response (in case of extra text)
       const validPositions = ["good", "high", "low", "left", "right", "uncertain", "no_cpr"];
       const position = validPositions.find(pos => rawText.includes(pos)) || "uncertain";
       
-      console.log(`Gemini raw response: "${rawText}" -> parsed: "${position}"`);
+      console.log(`📝 Gemini raw response: "${rawText}" -> parsed: "${position}"`);
       
       // High confidence for clear responses, lower for uncertain
       const confidence = position === "uncertain" ? 0.3 : 
@@ -555,12 +574,46 @@ class RescueApp extends AppServer {
       { voice_settings: { speed: TTS_SPEED } }
     );
     setTimeout(() => this.startMetronome(session, sessionId), 450);
+    setTimeout(() => this.startHandCheckTimer(session, sessionId), 1000); // Start hand checking after 1 second
   }
   private async enterSettings(session: AppSession, sessionId: string) {
     const c = this.ctx(sessionId);
     c.state.currentState = "settings";
     const saveTxt = c.state.saveForQA ? "enabled" : "disabled";
-    await this.queueTTS(session, sessionId, `Settings. Photo saving is ${saveTxt}. Say “back to compressions”.`);
+    await this.queueTTS(session, sessionId, `Settings. Photo saving is ${saveTxt}. Say "back to compressions".`);
+  }
+
+  // Start automatic hand position checking every 3 seconds
+  private startHandCheckTimer(session: AppSession, sessionId: string) {
+    const c = this.ctx(sessionId);
+    
+    // Clear any existing timer
+    if (c.state.handCheckTimer) {
+      clearTimeout(c.state.handCheckTimer);
+    }
+    
+    // Start new timer
+    const checkHands = async () => {
+      if (c.state.currentState === "compressions") {
+        await this.checkHandPosition(session, sessionId);
+        // Schedule next check in 3 seconds
+        c.state.handCheckTimer = setTimeout(checkHands, 3000);
+      }
+    };
+    
+    // Start the first check
+    c.state.handCheckTimer = setTimeout(checkHands, 3000);
+    console.log("🔄 Started automatic hand position checking every 3 seconds");
+  }
+
+  // Stop automatic hand position checking
+  private stopHandCheckTimer(sessionId: string) {
+    const c = this.ctx(sessionId);
+    if (c.state.handCheckTimer) {
+      clearTimeout(c.state.handCheckTimer);
+      c.state.handCheckTimer = undefined;
+      console.log("⏹️ Stopped automatic hand position checking");
+    }
   }
 
   private async changeBPM(session: AppSession, sessionId: string) {
@@ -611,16 +664,7 @@ class RescueApp extends AppServer {
         setTimeout(() => this.enterResponsiveness(session, sessionId), 1000);
         return;
       }
-      if (nlu.intent === "CHECK_HANDS") {
-        if (c.state.currentState !== "compressions") {
-          await this.queueTTS(session, sessionId, "Starting compressions, then I’ll check hand position.");
-          await this.enterCompressions(session, sessionId);
-          setTimeout(() => this.captureHandsPhoto(session, sessionId), 300);
-        } else {
-          await this.captureHandsPhoto(session, sessionId);
-        }
-        return;
-      }
+      // CHECK_HANDS intent removed - now using automatic 3-second timer
 
       // State-specific
       switch (c.state.currentState) {
