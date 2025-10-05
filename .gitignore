@@ -30,3 +30,5 @@ photos/
 
 # TypeScript
 *.tsbuildinfo
+
+venv/

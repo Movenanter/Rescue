@@ -68,6 +68,11 @@ interface RescueSessionState {
 
   speechGuardUntil?: number;       // voice prompts only (NEVER pauses beats)
   metronomeTimer?: NodeJS.Timeout; // setTimeout handle
+  photoTimer?: NodeJS.Timeout;     // Auto photo capture timer
+  lastPhotoCompression: number;    // Track when last photo was taken
+  sessionStartTime?: number;       // Session start timestamp
+  // TODO: Add adaptive photo frequency based on technique quality
+  // photoFrequency?: number;      // Dynamic: 5 compressions (learning) -> 10-15 (stable technique)
 }
 
 interface SessionContext {
@@ -96,6 +101,7 @@ function initialState(): RescueSessionState {
     emergencyConfirmed: false,
     metronomeBPM: 110,
     saveForQA: true,
+    lastPhotoCompression: 0,
   };
 }
 
@@ -255,10 +261,22 @@ class RescueApp extends AppServer {
       this.fireTick(session);             // fire THIS beat (never skipped)
 
       c.state.compressionCount++;         // counts (do not block beats)
+      
+      // Auto-capture photo every 5 compressions (about 2.5-3 seconds)
+      if (c.state.compressionCount % 5 === 0) {
+        // Non-blocking photo capture
+        this.captureHandsPhoto(session, sessionId).catch(err => {
+          session.logger.error(`Auto photo capture failed: ${err}`);
+        });
+      }
+      
+      // Announce count every 10 compressions
       if (c.state.compressionCount % 10 === 0) {
         c.state.speechGuardUntil = Date.now() + 1100;
         this.queueTTS(session, sessionId, String(c.state.compressionCount));
       }
+      
+      // Two-minute warning
       if (c.state.compressionCount % 220 === 0) {
         c.state.speechGuardUntil = Date.now() + 2200;
         this.queueTTS(session, sessionId, "Two minutes completed. Consider reassessing or swapping rescuers.");
@@ -282,17 +300,22 @@ class RescueApp extends AppServer {
   }
 
   // ---- Photo capture + optional local save to SAVE_DIR ----
-  private async captureHandsPhoto(session: AppSession, sessionId: string) {
+  private async captureHandsPhoto(session: AppSession, sessionId: string, isAutomatic: boolean = true) {
     const c = this.ctx(sessionId);
 
-    c.state.speechGuardUntil = Date.now() + 2500; // announcement only
-
     if (!session.capabilities?.hasCamera) {
-      await this.queueTTS(session, sessionId, "I can't access a camera on this device, but keep compressions centered.");
+      // Only announce once if no camera
+      if (c.state.compressionCount <= 5) {
+        await this.queueTTS(session, sessionId, "No camera available, continuing without visual feedback.");
+      }
       return;
     }
 
-    await this.queueTTS(session, sessionId, "Taking a quick photo to check hand position.");
+    // Only announce for manual captures (user requested)
+    if (!isAutomatic) {
+      c.state.speechGuardUntil = Date.now() + 2500;
+      await this.queueTTS(session, sessionId, "Taking a quick photo to check hand position.");
+    }
 
     try {
       const photo: any = await session.camera.requestPhoto({});
@@ -302,21 +325,32 @@ class RescueApp extends AppServer {
         `Photo captured: name=${photo?.filename ?? "n/a"} bytes=${buf.byteLength} mime=${photo?.mimeType ?? "image/jpeg"}`
       );
 
-      // Try to analyze hands using backend, fallback to mock if backend fails
-      const analysis = await this.analyzeHandsWithBackend(buf, photo?.mimeType ?? "image/jpeg");
+      // Try to analyze hands using backend with session tracking
+      const analysis = await this.analyzeHandsWithBackend(
+        buf, 
+        photo?.mimeType ?? "image/jpeg",
+        sessionId,
+        c.state.compressionCount
+      );
       
-      // Generate guidance message
-      const guidanceMessages = {
-        "good": "Hands are centered perfectly. Keep going!",
-        "high": "Hands are too high. Move down toward the center of the chest.",
-        "low": "Hands are too low. Move up toward the center of the chest.",
-        "left": "Move hands slightly to the right, toward the center of the chest.",
-        "right": "Move hands slightly to the left, toward the center of the chest.",
-        "uncertain": "Hand position unclear. Try to center hands on the chest."
-      };
+      // Only provide audio feedback for corrections, not confirmations
+      // This prevents interrupting the CPR rhythm with constant feedback
+      if (analysis.priority === "critical" || analysis.priority === "warning") {
+        // Critical issues get immediate feedback
+        if (analysis.priority === "critical") {
+          c.state.speechGuardUntil = Date.now() + 2000;
+          await this.queueTTS(session, sessionId, analysis.guidance || "Adjust hand position");
+        } else if (!isAutomatic) {
+          // Warnings only spoken for manual checks
+          await this.queueTTS(session, sessionId, analysis.guidance || "Minor adjustment needed");
+        }
+      } else if (!isAutomatic && analysis.position === "good") {
+        // Only confirm good position for manual checks
+        await this.queueTTS(session, sessionId, "Position good, continue.");
+      }
       
-      const guidance = guidanceMessages[analysis.position as keyof typeof guidanceMessages] || "Continue with compressions.";
-      await this.queueTTS(session, sessionId, guidance);
+      // Log all analysis for session tracking
+      session.logger.info(`Photo ${c.state.compressionCount}: ${analysis.position} (${analysis.priority})`);
 
       // Try to upload to backend, but always save locally as backup
       const backendSuccess = await this.uploadPhotoToAPI(buf, photo?.mimeType ?? "image/jpeg", sessionId);
@@ -366,11 +400,18 @@ class RescueApp extends AppServer {
     }
   }
 
-  private async analyzeHandsWithBackend(buffer: Buffer, mimeType: string): Promise<{ position: string; confidence: number }> {
+  private async analyzeHandsWithBackend(
+    buffer: Buffer, 
+    mimeType: string,
+    sessionId: string,
+    compressionCount: number
+  ): Promise<{ position: string; confidence: number; guidance?: string; priority?: string }> {
     try {
       const formData = new FormData();
       const blob = new Blob([new Uint8Array(buffer)], { type: mimeType });
-      formData.append("file", blob, `hands_${Date.now()}.jpg`);
+      formData.append("file", blob, `hands_${sessionId}_${compressionCount}.jpg`);
+      formData.append("session_id", sessionId);
+      formData.append("compression_count", String(compressionCount));
 
       const response = await fetch("http://localhost:8000/analyze-hands", {
         method: "POST",
@@ -382,13 +423,21 @@ class RescueApp extends AppServer {
       }
 
       const result = await response.json();
-      return result.analysis;
+      return {
+        position: result.analysis?.position || "uncertain",
+        confidence: result.analysis?.confidence || 0,
+        guidance: result.guidance,
+        priority: result.priority || "normal"
+      };
     } catch (error) {
       console.error("Backend analysis failed, using fallback:", error);
       // Fallback to mock analysis
+      const position = ["good", "high", "low", "left", "right", "uncertain"][Math.floor(Math.random() * 6)];
       return {
-        position: ["good", "high", "low", "left", "right", "uncertain"][Math.floor(Math.random() * 6)],
-        confidence: Math.random() * 0.4 + 0.6
+        position,
+        confidence: Math.random() * 0.4 + 0.6,
+        guidance: "Continue compressions",
+        priority: position === "good" ? "good" : "warning"
       };
     }
   }
@@ -487,11 +536,11 @@ class RescueApp extends AppServer {
       }
       if (nlu.intent === "CHECK_HANDS") {
         if (c.state.currentState !== "compressions") {
-          await this.queueTTS(session, sessionId, "Starting compressions, then I’ll check hand position.");
+          await this.queueTTS(session, sessionId, "Starting compressions, then I'll check hand position.");
           await this.enterCompressions(session, sessionId);
-          setTimeout(() => this.captureHandsPhoto(session, sessionId), 300);
+          setTimeout(() => this.captureHandsPhoto(session, sessionId, false), 300); // Manual check
         } else {
-          await this.captureHandsPhoto(session, sessionId);
+          await this.captureHandsPhoto(session, sessionId, false); // Manual check
         }
         return;
       }

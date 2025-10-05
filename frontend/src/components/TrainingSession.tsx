@@ -33,6 +33,7 @@ const TrainingSession: React.FC = () => {
   const [analyzing, setAnalyzing] = useState(false)
   const [backendConnected, setBackendConnected] = useState(false)
   const [analysisResults, setAnalysisResults] = useState<any[]>([])
+  const [latestAnalysisMethod, setLatestAnalysisMethod] = useState<string>('')
   
   // Initialize backend connection check
   useEffect(() => {
@@ -108,18 +109,36 @@ const TrainingSession: React.FC = () => {
       
       // Update metrics based on analysis
       if (result.metrics) {
-        setCurrentDepth(result.metrics.depth_inches)
-        setCurrentRate(result.metrics.quality_percent * 1.2) // Convert quality to approximate rate
+        setCurrentDepth(result.metrics.depth_inches || 0)
+        setCurrentRate(result.metrics.quality_percent ? result.metrics.quality_percent * 1.2 : 0)
       }
       
-      // Add feedback
-      const feedbackMessage = result.guidance || result.analysis?.position || 'Analysis complete'
-      setFeedback(prev => [...prev, feedbackMessage])
+      // Set analysis method indicator
+      setLatestAnalysisMethod(result.analysis_method || 'unknown')
       
-      // Store analysis result
+      // Add primary feedback
+      const feedbackMessage = result.guidance || result.analysis?.position || 'Analysis complete'
+      setFeedback(prev => [...prev, `[${result.analysis_method?.toUpperCase() || 'AI'}] ${feedbackMessage}`])
+      
+      // Add detailed feedback if available (from Replicate)
+      if (result.detailed_feedback && Array.isArray(result.detailed_feedback)) {
+        result.detailed_feedback.forEach((detail: string) => {
+          if (detail && detail.trim()) {
+            setFeedback(prev => [...prev, `• ${detail}`])
+          }
+        })
+      }
+      
+      // Add positive aspects if available
+      if (result.positive_aspects && result.positive_aspects.length > 0) {
+        setFeedback(prev => [...prev, `✓ Good: ${result.positive_aspects.join(', ')}`])
+      }
+      
+      // Store analysis result with enhanced data
       setAnalysisResults(prev => [...prev, {
         timestamp: new Date(),
-        result: result
+        result: result,
+        method: result.analysis_method
       }])
       
     } catch (error) {
