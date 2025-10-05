@@ -1,6 +1,6 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 import uvicorn
 import base64
 import io
@@ -386,9 +386,11 @@ async def analyze_hands(file: UploadFile = File(...)):
 @app.post("/upload-photo")
 async def upload_photo(
     file: UploadFile = File(...),
-    user_id: str = None,
-    session_id: str = None,
-    timestamp: str = None
+    user_id: str = Form(None),
+    session_id: str = Form(None),
+    timestamp: str = Form(None),
+    mentra_analysis: str = Form(None),
+    mentra_guidance: str = Form(None)
 ):
     """
     Upload and store photo for QA purposes
@@ -401,21 +403,43 @@ async def upload_photo(
         # Read image data
         image_data = await file.read()
         
-        # Analyze the image
-        analysis = analyze_cpr_image(image_data)
-        guidance = generate_guidance(analysis)
+        # Use Mentra glasses analysis if available, otherwise do backend analysis
+        if mentra_analysis and mentra_guidance:
+            # Parse Mentra analysis
+            import json
+            mentra_data = json.loads(mentra_analysis)
+            
+            # Create analysis structure compatible with our system
+            analysis = {
+                "position": mentra_data.get("position", "unknown"),
+                "confidence": mentra_data.get("confidence", 0),
+                "source": "mentra_glasses"
+            }
+            
+            guidance = {
+                "instruction": mentra_guidance,
+                "all_feedback": [mentra_guidance],
+                "priority": "good" if mentra_data.get("position") == "good" else "warning",
+                "metrics": {
+                    "quality_percent": mentra_data.get("confidence", 0) * 100
+                }
+            }
+        else:
+            # Fallback to backend analysis
+            analysis = analyze_cpr_image(image_data)
+            guidance = generate_guidance(analysis)
+            analysis["source"] = "backend"
         
         # Save photo with analysis results
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        quality = analysis.get("quality", 0) * 100
-        filename = f"cpr_{user_id or 'unknown'}_{timestamp}_q{quality:.0f}.jpg"
+        timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+        quality = analysis.get("confidence", 0) * 100 if analysis.get("source") == "mentra_glasses" else analysis.get("quality", 0) * 100
+        filename = f"cpr_{user_id or 'unknown'}_{timestamp_str}_q{quality:.0f}.jpg"
         filepath = os.path.join(PHOTOS_DIR, filename)
         
         with open(filepath, "wb") as f:
             f.write(image_data)
         
         # Save analysis results as json
-        import json
         json_path = filepath.replace('.jpg', '_analysis.json')
         with open(json_path, 'w') as f:
             json.dump({
@@ -453,6 +477,63 @@ async def generate_summary(request: SummaryRequest):
         logger.error(f"Error in generate-summary endpoint: {e}")
         raise HTTPException(status_code=500, detail=f"Error generating summary: {str(e)}")
 
+@app.get("/photos/{filename}")
+async def get_photo(filename: str):
+    """Serve photo files"""
+    try:
+        filepath = os.path.join(PHOTOS_DIR, filename)
+        if os.path.exists(filepath):
+            return FileResponse(filepath)
+        else:
+            raise HTTPException(status_code=404, detail="Photo not found")
+    except Exception as e:
+        logger.error(f"Error serving photo {filename}: {e}")
+        raise HTTPException(status_code=500, detail=f"Error serving photo: {str(e)}")
+
+@app.get("/recent-photos")
+async def get_recent_photos(limit: int = 10):
+    """Get recent photos with analysis"""
+    try:
+        import glob
+        import json
+        
+        # Get all analysis JSON files
+        json_files = glob.glob(os.path.join(PHOTOS_DIR, "*_analysis.json"))
+        
+        # Sort by modification time (newest first)
+        json_files.sort(key=os.path.getmtime, reverse=True)
+        
+        photos = []
+        for json_file in json_files[:limit]:
+            try:
+                with open(json_file, 'r') as f:
+                    analysis_data = json.load(f)
+                
+                # Get corresponding image file
+                image_file = json_file.replace('_analysis.json', '.jpg')
+                if os.path.exists(image_file):
+                    photos.append({
+                        "filename": os.path.basename(image_file),
+                        "timestamp": analysis_data.get("timestamp"),
+                        "user_id": analysis_data.get("user_id"),
+                        "session_id": analysis_data.get("session_id"),
+                        "analysis": analysis_data.get("analysis"),
+                        "guidance": analysis_data.get("guidance")
+                    })
+            except Exception as e:
+                logger.error(f"Error reading {json_file}: {e}")
+                continue
+        
+        return {
+            "success": True,
+            "photos": photos,
+            "count": len(photos)
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting recent photos: {e}")
+        raise HTTPException(status_code=500, detail=f"Error getting recent photos: {str(e)}")
+
 @app.get("/health")
 async def health_check():
     """Detailed health check"""
@@ -470,6 +551,7 @@ async def health_check():
             "/",
             "/analyze-hands",
             "/upload-photo",
+            "/recent-photos",
             "/health"
         ],
         "photos_directory": PHOTOS_DIR

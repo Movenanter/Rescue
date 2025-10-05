@@ -52,6 +52,19 @@ interface UploadPhotoResponse {
   file_path: string
 }
 
+interface RecentPhotosResponse {
+  success: boolean
+  photos: Array<{
+    filename: string
+    timestamp: string
+    user_id: string
+    session_id: string
+    analysis: any
+    guidance: any
+  }>
+  count: number
+}
+
 // API Services
 export const apiService = {
   // Health check
@@ -101,6 +114,12 @@ export const apiService = {
       analysisData
     })
     return response.data.summary
+  },
+
+  // Get recent photos with analysis
+  async getRecentPhotos(limit: number = 10): Promise<RecentPhotosResponse> {
+    const response = await apiClient.get<RecentPhotosResponse>(`/recent-photos?limit=${limit}`)
+    return response.data
   },
 
   // Session management endpoints (mock for now)

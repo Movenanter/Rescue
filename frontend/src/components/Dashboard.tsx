@@ -8,7 +8,9 @@ import {
   TrendingUp,
   Calendar,
   ChevronRight,
-  Loader2
+  Loader2,
+  Camera,
+  Eye
 } from 'lucide-react'
 import Header from './Header'
 import TrialTypeSidebar from './TrialTypeSidebar'
@@ -21,6 +23,8 @@ const Dashboard: React.FC = () => {
   const [sessions, setSessions] = useState(mockSessions) // Fallback to mock data initially
   const [loading, setLoading] = useState(false)
   const [backendConnected, setBackendConnected] = useState(false)
+  const [recentPhotos, setRecentPhotos] = useState<any[]>([])
+  const [photosLoading, setPhotosLoading] = useState(false)
   
   const filteredSessions = useMemo(() => {
     if (selectedTrialType === 'all') return sessions
@@ -61,6 +65,29 @@ const Dashboard: React.FC = () => {
       }
       
       loadSessions()
+    }
+  }, [backendConnected])
+
+  // Load recent photos from Mentra glasses
+  useEffect(() => {
+    if (backendConnected) {
+      const loadRecentPhotos = async () => {
+        setPhotosLoading(true)
+        try {
+          const photosData = await apiService.getRecentPhotos(5)
+          setRecentPhotos(photosData.photos)
+        } catch (error) {
+          console.warn('Failed to load recent photos:', error)
+        } finally {
+          setPhotosLoading(false)
+        }
+      }
+      
+      loadRecentPhotos()
+      
+      // Poll for new photos every 5 seconds
+      const interval = setInterval(loadRecentPhotos, 5000)
+      return () => clearInterval(interval)
     }
   }, [backendConnected])
 
@@ -223,6 +250,98 @@ const Dashboard: React.FC = () => {
                 )}
               </div>
             </div>
+
+            {/* Recent Photos from Mentra Glasses */}
+            {backendConnected && (
+              <div className="bg-white/70 backdrop-blur-sm rounded-2xl p-6 border border-primary-200 shadow-lg mb-8">
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="text-xl font-semibold flex items-center space-x-2">
+                    <Camera className="w-5 h-5 text-primary-700" />
+                    <span>Recent Analysis from Mentra Glasses</span>
+                    {photosLoading && <Loader2 className="w-4 h-4 animate-spin text-primary-600" />}
+                  </h2>
+                  <div className="text-sm text-primary-600">
+                    {recentPhotos.length} photo{recentPhotos.length !== 1 ? 's' : ''} analyzed
+                  </div>
+                </div>
+                
+                <div className="space-y-3">
+                  {recentPhotos.length === 0 ? (
+                    <div className="text-center py-8 text-primary-600">
+                      <Eye className="w-12 h-12 mx-auto mb-3 opacity-50" />
+                      <p>No photos analyzed yet</p>
+                      <p className="text-sm">Take a photo with the Mentra glasses to see analysis here</p>
+                    </div>
+                  ) : (
+                    recentPhotos.map((photo, index) => (
+                      <div
+                        key={index}
+                        className="p-4 bg-white/50 backdrop-blur-sm rounded-lg border border-primary-200 shadow-md"
+                      >
+                        <div className="flex gap-4">
+                          {/* Photo Display */}
+                          <div className="flex-shrink-0">
+                            <img
+                              src={`http://localhost:8000/photos/${photo.filename}`}
+                              alt="CPR Analysis"
+                              className="w-24 h-24 object-cover rounded-lg border border-primary-200"
+                              onError={(e) => {
+                                e.currentTarget.style.display = 'none';
+                              }}
+                            />
+                          </div>
+                          
+                          {/* Analysis Details */}
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center justify-between mb-2">
+                              <div className="flex items-center space-x-3">
+                                <FileText className="w-4 h-4 text-primary-600" />
+                                <span className="text-sm font-medium">
+                                  {new Date(photo.timestamp).toLocaleString()}
+                                </span>
+                                <span className="text-xs text-primary-500">
+                                  {photo.user_id}
+                                </span>
+                              </div>
+                              <span className="text-xs px-2 py-1 bg-blue-100 text-blue-700 rounded-full">
+                                {photo.analysis?.source === 'mentra_glasses' ? 'Mentra' : 'Backend'}
+                              </span>
+                            </div>
+                            <div className="space-y-2">
+                              <div className="flex items-center space-x-2">
+                                <span className="text-sm font-medium text-primary-700">Analysis:</span>
+                                <span className={`text-sm px-2 py-1 rounded-full ${
+                                  photo.analysis?.position === 'good' 
+                                    ? 'bg-green-100 text-green-700'
+                                    : photo.analysis?.position === 'no_cpr'
+                                    ? 'bg-gray-100 text-gray-700'
+                                    : photo.analysis?.position === 'uncertain'
+                                    ? 'bg-yellow-100 text-yellow-700'
+                                    : 'bg-red-100 text-red-700'
+                                }`}>
+                                  {photo.analysis?.position || 'unknown'}
+                                </span>
+                                <span className="text-xs text-primary-500">
+                                  (confidence: {Math.round((photo.analysis?.confidence || 0) * 100)}%)
+                                </span>
+                              </div>
+                              <div className="text-sm text-primary-600">
+                                <strong>Guidance:</strong> {photo.guidance?.instruction || 'No guidance available'}
+                              </div>
+                              {photo.guidance?.all_feedback && photo.guidance.all_feedback.length > 0 && (
+                                <div className="text-xs text-primary-500">
+                                  <strong>Feedback:</strong> {photo.guidance.all_feedback.join(', ')}
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            )}
 
             <div className="mt-8 bg-white/60 backdrop-blur-sm border border-primary-200 rounded-2xl p-6 shadow-lg">
               <div className="flex items-center justify-between">

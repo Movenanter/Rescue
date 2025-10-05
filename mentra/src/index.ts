@@ -148,25 +148,33 @@ async function classifyIntentWithGemini(
 function classifyIntentHeuristic(text: string, state: AppState): IntentResult {
   const t = norm(text);
 
+  // State-specific intent classification (highest priority)
   if (state === "responsiveness_check") {
-    if (/\b(no|nope|nah|negative)\b/.test(t) || /(did\s*(not|n't)\s*respond)/.test(t) || /\b(not\s*respond(ing)?)\b/.test(t) || /\bunresponsive\b/.test(t)) {
+    if (/\b(no|nope|nah|negative|didn'?t respond|not responding|unresponsive|won'?t wake|isn'?t waking)\b/.test(t)) {
       return { intent: "RESPONSIVE_NO" };
     }
-    if (/\b(yes|yeah|yep|affirmative|they did respond|they responded|they answered|responding)\b/.test(t)) {
+    if (/\b(yes|yeah|yep|affirmative|they did respond|they responded|they answered|responding|they'?re ok|they'?re okay|responsive|came to)\b/.test(t)) {
       return { intent: "RESPONSIVE_YES" };
     }
+    // In responsiveness_check, don't classify safety-related intents
+    return { intent: "UNKNOWN" };
   }
 
-  if (/\b(not\s+safe|unsafe|hazard|danger|risky|not\s+clear)\b/.test(t)) return { intent: "HAZARD_PRESENT" };
+  if (state === "safety_check") {
+    if (/\b(not\s+safe|unsafe|hazard|danger|risky|not\s+clear)\b/.test(t)) {
+      return { intent: "HAZARD_PRESENT" };
+    }
+    if (/\b(it'?s\s+safe|safe|all\s+clear|clear|it'?s\s+ok(ay)?|we('?re)?\s+good|good\s+to\s+go|looks\s+fine|should\s+be\s+safe|seems\s+safe)\b/.test(t)) {
+      return { intent: "CONFIRM_SAFETY" };
+    }
+    // In safety_check, don't classify responsiveness-related intents
+    return { intent: "UNKNOWN" };
+  }
+
+  // Global intents (work in any state)
   if (/\b(start(ing)?|begin|start over|again)\b/.test(t)) return { intent: "START" };
-  if (/\b(it'?s\s+safe|safe|all\s+clear|clear|it'?s\s+ok(ay)?|we('?re)?\s+good|good\s+to\s+go|looks\s+fine|should\s+be\s+safe|seems\s+safe)\b/.test(t))
-    return { intent: "CONFIRM_SAFETY" };
   if (/(i|we).*(called|dialed).*(911|emergency)|\b(911|emergency)\b.*(called|on the line)/.test(t))
     return { intent: "EMERGENCY_CALLED" };
-  if (/\b(responding|they answered|they'?re ok|they'?re okay|responsive|came to)\b/.test(t))
-    return { intent: "RESPONSIVE_YES" };
-  if (/\b(no response|not responding|unresponsive|won'?t wake|isn'?t waking)\b/.test(t) || /(did\s*(not|n't)\s*respond)/.test(t))
-    return { intent: "RESPONSIVE_NO" };
   if (/\b(check|center|hands|position|placement)\b/.test(t)) return { intent: "CHECK_HANDS" };
   if (/\b(change.*(speed|bpm)|speed\s*up|slow\s*down|faster|slower|increase\s*speed|decrease\s*speed)\b/.test(t))
     return { intent: "CHANGE_BPM" };
@@ -302,8 +310,15 @@ class RescueApp extends AppServer {
         `Photo captured: name=${photo?.filename ?? "n/a"} bytes=${buf.byteLength} mime=${photo?.mimeType ?? "image/jpeg"}`
       );
 
-      // Try to analyze hands using backend, fallback to mock if backend fails
-      const analysis = await this.analyzeHandsWithBackend(buf, photo?.mimeType ?? "image/jpeg");
+      // Try to analyze hands using Gemini API first, then fallback to backend
+      let analysis;
+      if (GEMINI_API_KEY) {
+        console.log("Using Gemini API for analysis (API key configured)");
+        analysis = await this.analyzeHandsWithGemini(buf, photo?.mimeType ?? "image/jpeg");
+      } else {
+        console.log("Using backend for analysis (no Gemini API key)");
+        analysis = await this.analyzeHandsWithBackend(buf, photo?.mimeType ?? "image/jpeg");
+      }
       
       // Generate guidance message
       const guidanceMessages = {
@@ -312,14 +327,25 @@ class RescueApp extends AppServer {
         "low": "Hands are too low. Move up toward the center of the chest.",
         "left": "Move hands slightly to the right, toward the center of the chest.",
         "right": "Move hands slightly to the left, toward the center of the chest.",
-        "uncertain": "Hand position unclear. Try to center hands on the chest."
+        "uncertain": "Hand position unclear. Try to center hands on the chest.",
+        "no_cpr": "No CPR in progress."
       };
       
-      const guidance = guidanceMessages[analysis.position as keyof typeof guidanceMessages] || "Continue with compressions.";
-      await this.queueTTS(session, sessionId, guidance);
+      // Additional fallback: if we get "uncertain" but the analysis confidence is low, 
+      // it might be because no CPR is happening
+      let finalGuidance = guidanceMessages[analysis.position as keyof typeof guidanceMessages] || "Continue with compressions.";
+      
+      if (analysis.position === "uncertain" && analysis.confidence < 0.5) {
+        finalGuidance = "No CPR detected.";
+      }
+      
+      console.log(`Analysis result: position="${analysis.position}", confidence=${analysis.confidence}`);
+      console.log(`Selected guidance: "${finalGuidance}"`);
+      
+      await this.queueTTS(session, sessionId, finalGuidance);
 
       // Try to upload to backend, but always save locally as backup
-      const backendSuccess = await this.uploadPhotoToAPI(buf, photo?.mimeType ?? "image/jpeg", sessionId);
+      const backendSuccess = await this.uploadPhotoToAPI(buf, photo?.mimeType ?? "image/jpeg", sessionId, analysis, finalGuidance);
       
       // Always save locally (either as primary or backup)
       try { 
@@ -341,13 +367,21 @@ class RescueApp extends AppServer {
   }
 
   // ---- Backend integration ----
-  private async uploadPhotoToAPI(buffer: Buffer, mimeType: string, sessionId: string): Promise<boolean> {
+  private async uploadPhotoToAPI(buffer: Buffer, mimeType: string, sessionId: string, analysis?: { position: string; confidence: number }, guidance?: string): Promise<boolean> {
     try {
       const formData = new FormData();
       const blob = new Blob([new Uint8Array(buffer)], { type: mimeType });
       formData.append("file", blob, `cpr_${sessionId}_${Date.now()}.jpg`);
       formData.append("user_id", sessionId);
       formData.append("timestamp", new Date().toISOString());
+      
+      // Send the analysis results from Mentra glasses
+      if (analysis) {
+        formData.append("mentra_analysis", JSON.stringify(analysis));
+      }
+      if (guidance) {
+        formData.append("mentra_guidance", guidance);
+      }
 
       const response = await fetch("http://localhost:8000/upload-photo", {
         method: "POST",
@@ -366,12 +400,77 @@ class RescueApp extends AppServer {
     }
   }
 
+  private async analyzeHandsWithGemini(buffer: Buffer, mimeType: string): Promise<{ position: string; confidence: number }> {
+    try {
+      if (!GEMINI_API_KEY) {
+        throw new Error("GEMINI_API_KEY not configured");
+      }
+
+      const base64Image = buffer.toString('base64');
+      
+      const requestBody = {
+        contents: [{
+          parts: [{
+            text: "Analyze this image carefully. Are hands actually placed on a person's chest for CPR compressions? If hands are in the air, not touching anyone, or not positioned for CPR, respond 'no_cpr'. If hands are on someone's chest doing CPR, determine position: 'good' (centered), 'high' (too high), 'low' (too low), 'left' (too far left), 'right' (too far right). If you cannot clearly see the scene, respond 'uncertain'. Respond with exactly one word only."
+          }, {
+            inline_data: {
+              mime_type: mimeType,
+              data: base64Image
+            }
+          }]
+        }],
+        generationConfig: {
+          temperature: 0.1,
+          maxOutputTokens: 15
+        }
+      };
+
+      const startTime = Date.now();
+      const response = await fetch(`${GEMINI_ENDPOINT}?key=${GEMINI_API_KEY}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(requestBody),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Gemini API failed: ${response.statusText}`);
+      }
+
+      const result = await response.json();
+      const endTime = Date.now();
+      const duration = endTime - startTime;
+      
+      console.log(`Gemini analysis completed in ${duration}ms`);
+      
+      const text = result.candidates?.[0]?.content?.parts?.[0]?.text?.toLowerCase().trim();
+      const validPositions = ["good", "high", "low", "left", "right", "uncertain", "no_cpr"];
+      
+      console.log(`Gemini raw response: "${text}"`);
+      
+      const position = validPositions.includes(text) ? text : "uncertain";
+      const confidence = position === "uncertain" ? 0.3 : (position === "no_cpr" ? 0.9 : 0.8);
+      
+      console.log(`Gemini final position: "${position}" (confidence: ${confidence})`);
+      
+      return { position, confidence };
+    } catch (error) {
+      console.error("Gemini analysis failed:", error);
+      return {
+        position: "uncertain",
+        confidence: 0.0
+      };
+    }
+  }
+
   private async analyzeHandsWithBackend(buffer: Buffer, mimeType: string): Promise<{ position: string; confidence: number }> {
     try {
       const formData = new FormData();
       const blob = new Blob([new Uint8Array(buffer)], { type: mimeType });
       formData.append("file", blob, `hands_${Date.now()}.jpg`);
 
+      const startTime = Date.now();
       const response = await fetch("http://localhost:8000/analyze-hands", {
         method: "POST",
         body: formData,
@@ -382,12 +481,25 @@ class RescueApp extends AppServer {
       }
 
       const result = await response.json();
-      return result.analysis;
+      const endTime = Date.now();
+      const duration = endTime - startTime;
+      
+      console.log(`Backend analysis completed in ${duration}ms`);
+      
+      // Ensure the backend result includes the new "no_cpr" position
+      const validPositions = ["good", "high", "low", "left", "right", "uncertain", "no_cpr"];
+      const position = validPositions.includes(result.analysis?.position) ? result.analysis.position : "uncertain";
+      
+      return {
+        position,
+        confidence: result.analysis?.confidence || 0.5
+      };
     } catch (error) {
       console.error("Backend analysis failed, using fallback:", error);
-      // Fallback to mock analysis
+      // Fallback to mock analysis - include "no_cpr" in possible responses
+      const positions = ["good", "high", "low", "left", "right", "uncertain", "no_cpr"];
       return {
-        position: ["good", "high", "low", "left", "right", "uncertain"][Math.floor(Math.random() * 6)],
+        position: positions[Math.floor(Math.random() * positions.length)],
         confidence: Math.random() * 0.4 + 0.6
       };
     }
@@ -473,7 +585,7 @@ class RescueApp extends AppServer {
       if (nlu.intent === "SHUTDOWN") {
         await this.stopAllAudio(session);
         this.stopMetronome(sessionId);
-        await this.queueTTS(session, sessionId, "Shutting down the CPR app. Goodbye.");
+        await this.queueTTS(session, sessionId, "Shutting down the CPR app.");
         setTimeout(() => {
           process.exit(0);
         }, 2000);
@@ -509,19 +621,26 @@ class RescueApp extends AppServer {
           } else if (nlu.intent === "HAZARD_PRESENT") {
             await this.queueTTS(session, sessionId, "Emergency! Call 911 immediately. Tell me when emergency is called.");
           } else {
-            await this.queueTTS(session, sessionId, "Is the scene safe or not?");
+            // Only ask about safety if we haven't already confirmed it
+            // Add a small delay to avoid rapid-fire questions
+            setTimeout(() => {
+              this.queueTTS(session, sessionId, "Please confirm: is the scene safe or not?");
+            }, 500);
           }
           break;
         }
         case "responsiveness_check": {
           if (nlu.intent === "RESPONSIVE_YES") {
-            await this.queueTTS(session, sessionId, "Good. Monitor them and call for help if needed.");
-            await this.enterSafetyCheck(session, sessionId);
+            await this.queueTTS(session, sessionId, "Good. Monitor them and call for help if needed. If their condition worsens, say 'start' to begin CPR.");
+            // Stay in responsiveness_check state, don't loop back to safety
           } else if (nlu.intent === "RESPONSIVE_NO") {
             await this.queueTTS(session, sessionId, "No response detected. Starting CPR compressions now.");
             setTimeout(() => this.enterCompressions(session, sessionId), 800);
           } else {
-            await this.queueTTS(session, sessionId, "Did they respond or not?");
+            // Add a small delay to avoid rapid-fire questions
+            setTimeout(() => {
+              this.queueTTS(session, sessionId, "Please tell me: did they respond or not?");
+            }, 500);
           }
           break;
         }
