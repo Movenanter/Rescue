@@ -1,24 +1,26 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
-import base64
-import io
 import os
 import cv2
 import numpy as np
 import tensorflow as tf
 from typing import Dict, Any, Optional, List
 import logging
-import httpx
-import asyncio
-from urllib.parse import urljoin
+from datetime import datetime
+from PIL import Image
+from pydantic import BaseModel
+import json
+import uuid
+import base64
+import requests
 
-# Configure logging first
+# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Try to import mediapipe, but handle if not available
+# Try to import mediapipe for pose detection
 try:
     import mediapipe as mp
     MEDIAPIPE_AVAILABLE = True
@@ -27,57 +29,27 @@ except ImportError:
     MEDIAPIPE_AVAILABLE = False
     mp = None
 
-from datetime import datetime
-from PIL import Image
-from pydantic import BaseModel
-import json
-
-# Try to import optional services
-try:
-    from replicate_service import (
-        analyze_with_replicate,
-        convert_replicate_to_standard_format
-    )
-    REPLICATE_AVAILABLE = True
-except ImportError:
-    logger.warning("Replicate service not available")
-    REPLICATE_AVAILABLE = False
-
-# Try to import OpenAI
-try:
-    import openai
-    OPENAI_AVAILABLE = True
-except ImportError:
-    logger.warning("OpenAI not available - AI summaries disabled")
-    OPENAI_AVAILABLE = False
-
-# Environment variables
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-ML_SERVICE_URL = os.getenv("ML_SERVICE_URL", "http://localhost:5000")
-ML_SERVICE_TIMEOUT = int(os.getenv("ML_SERVICE_TIMEOUT", "30"))
-USE_ML_SERVICE = os.getenv("USE_ML_SERVICE", "true").lower() == "true"
-
-# Initialize OpenAI client if API key is provided
-if OPENAI_AVAILABLE and OPENAI_API_KEY:
-    openai.api_key = OPENAI_API_KEY
-else:
-    logger.warning("OpenAI API not configured - AI summaries will be disabled")
-
-# Create photos directory
+# Create directories for data storage
 PHOTOS_DIR = "backend_photos"
+SESSIONS_DIR = "sessions"
 os.makedirs(PHOTOS_DIR, exist_ok=True)
+os.makedirs(SESSIONS_DIR, exist_ok=True)
 
-app = FastAPI(title="Rescue CPR Backend (TFLite)", version="2.0.0")
+app = FastAPI(title="Rescue CPR Backend", version="3.0.0")
 
 # Pydantic models for API requests/responses
-class SummaryRequest(BaseModel):
-    sessionId: str
-    analysisData: Dict[str, Any]
+class SessionData(BaseModel):
+    session_id: str
+    device_id: str
+    timestamp: str
+    metrics: Dict[str, Any]
+    photos: List[str] = []
+    
+class AnalysisRequest(BaseModel):
+    session_id: str
+    device_id: str
 
-class SummaryResponse(BaseModel):
-    summary: str
-
-# Enable CORS for glasses communication
+# Enable CORS for all origins
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -87,22 +59,24 @@ app.add_middleware(
 )
 
 # TFLite model configuration
-TFLITE_MODEL_PATH = "./ml/cpr_model.tflite"  # adjust path as needed
+TFLITE_MODEL_PATH = "./ml/cpr_model.tflite"
 tflite_interpreter = None
 tflite_input_details = None
 tflite_output_details = None
 pose_detector = None
 
-# HTTP client for ML service
-ml_client = None
-if USE_ML_SERVICE:
-    try:
-        ml_client = httpx.AsyncClient(
-            base_url=ML_SERVICE_URL,
-            timeout=ML_SERVICE_TIMEOUT
-        )
-    except Exception as e:
-        logger.warning(f"Could not initialize ML service client: {e}")
+# Session storage (in-memory for now, can be replaced with Redis later)
+active_sessions = {}
+
+# Gemini configuration for fallback
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_MODEL = "gemini-1.5-flash"
+GEMINI_ENDPOINT = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+
+if GEMINI_API_KEY:
+    logger.info("✓ Gemini API key found - fallback analysis available")
+else:
+    logger.info("No Gemini API key - using TFLite only")
 
 # Load TFLite model
 try:
@@ -180,82 +154,115 @@ def predict_with_tflite(image_array: np.ndarray) -> Optional[np.ndarray]:
         logger.error(f"TFLite prediction error: {e}")
         return None
 
-async def analyze_with_ml_service(image_bytes: bytes) -> Dict[str, Any]:
+def analyze_with_gemini(image_bytes: bytes) -> Optional[Dict[str, Any]]:
     """
-    Analyze CPR technique using external ML service
+    Use Gemini Vision as fallback for CPR analysis when TFLite fails
     """
+    if not GEMINI_API_KEY:
+        return None
+        
     try:
-        if not ml_client:
-            logger.error("ML service client not configured")
-            return {"error": "ML service not available"}
+        # Encode image to base64
+        base64_image = base64.b64encode(image_bytes).decode('utf-8')
         
-        # Encode image to base64 for ML service
-        image_base64 = base64.b64encode(image_bytes).decode('utf-8')
+        # Prepare the prompt for CPR analysis
+        prompt = """Analyze this CPR compression technique image. Focus on:
+1. Arm angle (should be 170-180 degrees, straight)
+2. Hand position (centered on chest)
+3. Body posture
+4. Overall technique quality
+
+Provide your analysis in this exact JSON format:
+{
+  "arm_angle_degrees": <number between 0-180>,
+  "hand_position": "good" or "needs_adjustment" or "left" or "right" or "high" or "low",
+  "compression_depth_estimate": <number between 0-5 inches>,
+  "overall_quality_score": <number between 0-1>,
+  "feedback": ["specific feedback item 1", "specific feedback item 2"],
+  "critical_issues": true or false
+}
+
+Be strict about arm angle - anything below 160 degrees needs correction."""
         
-        # Call ML service
-        response = await ml_client.post(
-            "/analyze-pose",
-            json={"image": image_base64}
-        )
-        
-        if response.status_code == 200:
-            ml_result = response.json()
-            
-            # Convert ML service response to our format
-            return {
-                "pose_detected": ml_result.get("detected", False),
-                "arm_angle": ml_result.get("metrics", {}).get("arm_angle", 0),
-                "depth": ml_result.get("metrics", {}).get("compression_depth", 0),
-                "hand_x": ml_result.get("metrics", {}).get("hand_position_error", 0.5),
-                "hand_y": 0.5,
-                "quality": ml_result.get("quality_score", 0) / 100,  # Convert to 0-1 scale
-                "phase": 0.5,  # Default phase
-                "feedback": ml_result.get("feedback", []),
-                "ml_service_used": True
+        # Prepare request body
+        request_body = {
+            "contents": [{
+                "parts": [
+                    {"text": prompt},
+                    {
+                        "inline_data": {
+                            "mime_type": "image/jpeg",
+                            "data": base64_image
+                        }
+                    }
+                ]
+            }],
+            "generationConfig": {
+                "temperature": 0.1,
+                "topK": 32,
+                "topP": 1,
+                "maxOutputTokens": 1024
             }
-        else:
-            logger.error(f"ML service returned status {response.status_code}")
-            return {"error": f"ML service error: {response.status_code}"}
+        }
+        
+        # Make request to Gemini
+        headers = {"Content-Type": "application/json"}
+        url = f"{GEMINI_ENDPOINT}?key={GEMINI_API_KEY}"
+        response = requests.post(url, json=request_body, headers=headers, timeout=10)
+        
+        if response.status_code != 200:
+            logger.error(f"Gemini API error: {response.status_code} - {response.text}")
+            return None
             
-    except httpx.TimeoutException:
-        logger.error("ML service timeout")
-        return {"error": "ML service timeout"}
+        # Parse response
+        result = response.json()
+        content = result.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+        
+        # Extract JSON from response
+        import re
+        json_match = re.search(r'\{[^}]+\}', content, re.DOTALL)
+        if json_match:
+            analysis = json.loads(json_match.group())
+            
+            # Convert to our expected format
+            return {
+                "analysis_source": "gemini_vision",
+                "arm_angle_degrees": analysis.get("arm_angle_degrees", 180),
+                "compression_depth_inches": analysis.get("compression_depth_estimate", 2.0),
+                "overall_quality_score": analysis.get("overall_quality_score", 0.5),
+                "hand_position": analysis.get("hand_position", "uncertain"),
+                "feedback": analysis.get("feedback", []),
+                "critical_issues": analysis.get("critical_issues", False),
+                "gemini_used": True
+            }
+        
+        return None
+        
     except Exception as e:
-        logger.error(f"Error calling ML service: {e}")
-        return {"error": str(e)}
+        logger.error(f"Gemini fallback error: {e}")
+        return None
 
-async def analyze_cpr_image(image_bytes: bytes) -> Dict[str, Any]:
-    """
-    Main analysis function with fallback chain:
-    Priority: 1) Replicate, 2) ML Service, 3) Local TFLite
-    """
+def create_session(device_id: str) -> str:
+    """Create a new CPR session"""
+    session_id = str(uuid.uuid4())
+    session_data = {
+        "session_id": session_id,
+        "device_id": device_id,
+        "start_time": datetime.now().isoformat(),
+        "photos": [],
+        "compressions": 0,
+        "metrics": []
+    }
+    active_sessions[session_id] = session_data
     
-    # Try Replicate first if available
-    if REPLICATE_AVAILABLE:
-        logger.info("Attempting analysis with Replicate vision model...")
-        try:
-            replicate_result = await analyze_with_replicate(image_bytes)
-            if not replicate_result.get("error"):
-                logger.info("Successfully analyzed with Replicate")
-                standard_format = convert_replicate_to_standard_format(replicate_result)
-                standard_format["analysis_source"] = "replicate"
-                return standard_format
-        except Exception as e:
-            logger.warning(f"Replicate analysis failed: {e}")
+    # Save to file
+    session_file = os.path.join(SESSIONS_DIR, f"{session_id}.json")
+    with open(session_file, 'w') as f:
+        json.dump(session_data, f)
     
-    # Try ML service if configured
-    if USE_ML_SERVICE and ml_client:
-        logger.info("Attempting ML service analysis...")
-        ml_result = await analyze_with_ml_service(image_bytes)
-        if not ml_result.get("error"):
-            ml_result["analysis_source"] = "ml_service"
-            return ml_result
-    
-    # Fall back to local TFLite model
-    logger.info("Using local TFLite model...")
-    return analyze_cpr_image_local(image_bytes)
+    return session_id
 
-def analyze_cpr_image_local(image_bytes: bytes) -> Dict[str, Any]:
+def analyze_cpr_image(image_bytes: bytes) -> Dict[str, Any]:
     """
     Analyze CPR technique using local TFLite model and optionally MediaPipe
     """
@@ -385,8 +392,24 @@ def analyze_cpr_image_local(image_bytes: bytes) -> Dict[str, Any]:
             except Exception as e:
                 logger.error(f"Error in TFLite prediction: {e}")
                 result["tflite_error"] = str(e)
+                
+                # Try Gemini as fallback
+                logger.info("TFLite failed, trying Gemini fallback...")
+                gemini_result = analyze_with_gemini(image_bytes)
+                if gemini_result:
+                    logger.info("Gemini fallback successful")
+                    result.update(gemini_result)
+                    result["feedback"] = gemini_result.get("feedback", [])
+                else:
+                    logger.warning("Both TFLite and Gemini failed")
         else:
-            result["message"] = "TFLite model not loaded - only basic analysis available"
+            # No TFLite model, try Gemini
+            logger.info("No TFLite model, trying Gemini...")
+            gemini_result = analyze_with_gemini(image_bytes)
+            if gemini_result:
+                result.update(gemini_result)
+            else:
+                result["message"] = "No analysis models available"
         
         return result
         
@@ -402,29 +425,64 @@ def analyze_cpr_image_local(image_bytes: bytes) -> Dict[str, Any]:
 async def root():
     """Root endpoint with service status"""
     return {
-        "service": "Rescue CPR Backend (TFLite)",
-        "version": "2.0.0",
+        "service": "Rescue CPR Backend",
+        "version": "3.0.0",
         "status": "running",
-        "model_type": "TFLite",
         "tflite_model": "loaded" if tflite_interpreter else "not loaded",
         "mediapipe": "initialized" if pose_detector else "not available",
-        "ml_service": "configured" if USE_ML_SERVICE else "disabled",
-        "replicate": "available" if REPLICATE_AVAILABLE else "not available",
-        "openai": "configured" if (OPENAI_AVAILABLE and OPENAI_API_KEY) else "not configured",
+        "active_sessions": len(active_sessions)
     }
 
+@app.post("/start-session")
+async def start_session(device_id: str = "default"):
+    """Start a new CPR session"""
+    session_id = create_session(device_id)
+    return {"session_id": session_id, "device_id": device_id}
+
+@app.get("/session/{session_id}")
+async def get_session(session_id: str):
+    """Get session data"""
+    if session_id in active_sessions:
+        return active_sessions[session_id]
+    
+    # Try loading from file
+    session_file = os.path.join(SESSIONS_DIR, f"{session_id}.json")
+    if os.path.exists(session_file):
+        with open(session_file, 'r') as f:
+            return json.load(f)
+    
+    raise HTTPException(status_code=404, detail="Session not found")
+
+@app.get("/sessions")
+async def list_sessions():
+    """List all sessions"""
+    sessions = []
+    for filename in os.listdir(SESSIONS_DIR):
+        if filename.endswith('.json'):
+            session_file = os.path.join(SESSIONS_DIR, filename)
+            with open(session_file, 'r') as f:
+                sessions.append(json.load(f))
+    return sessions
+
 @app.post("/analyze-pose")
-async def analyze_pose(file: UploadFile = File(...)):
+async def analyze_pose(file: UploadFile = File(...), session_id: Optional[str] = None):
     """
-    Analyze CPR pose from uploaded image
-    Uses fallback chain: Replicate → ML Service → Local TFLite
+    Analyze CPR pose from uploaded image using TFLite
     """
     try:
         # Read image
         image_bytes = await file.read()
         
-        # Analyze with fallback chain
-        result = await analyze_cpr_image(image_bytes)
+        # Analyze with TFLite
+        result = analyze_cpr_image(image_bytes)
+        
+        # Update session if provided
+        if session_id and session_id in active_sessions:
+            active_sessions[session_id]["metrics"].append(result)
+            # Save to file
+            session_file = os.path.join(SESSIONS_DIR, f"{session_id}.json")
+            with open(session_file, 'w') as f:
+                json.dump(active_sessions[session_id], f)
         
         return JSONResponse(content=result)
         
@@ -449,7 +507,7 @@ async def save_photo(file: UploadFile = File(...)):
         logger.info(f"Photo saved: {filename}")
         
         # Also analyze the photo
-        analysis = await analyze_cpr_image(content)
+        analysis = analyze_cpr_image(content)
         
         return JSONResponse(content={
             "message": "Photo saved successfully",
@@ -461,67 +519,115 @@ async def save_photo(file: UploadFile = File(...)):
         logger.error(f"Error saving photo: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/generate-summary")
-async def generate_summary(request: SummaryRequest):
-    """Generate AI summary of CPR session"""
+@app.post("/analyze-hands")
+async def analyze_hands(
+    file: UploadFile = File(...),
+    session_id: Optional[str] = Form(None),
+    compression_count: Optional[int] = Form(None)
+):
+    """
+    Analyze hand position for CPR - endpoint expected by Mentra glasses
+    """
     try:
-        if not (OPENAI_AVAILABLE and OPENAI_API_KEY):
-            return SummaryResponse(
-                summary="AI summary not available. Your session showed good effort! Keep practicing to improve your CPR technique."
-            )
+        # Read image
+        image_bytes = await file.read()
         
-        # Extract analysis data
-        session_id = request.sessionId
-        analysis_data = request.analysisData
+        # Analyze with TFLite
+        result = analyze_cpr_image(image_bytes)
         
-        # Create prompt for GPT
-        prompt = f"""
-        Generate a brief, constructive summary of this CPR training session:
+        # Map to Mentra expected format
+        hand_position = "good"
+        priority = "good"
+        guidance = "Position good, continue."
         
-        Session ID: {session_id}
+        # Determine hand position based on metrics
+        if result.get("tflite_used"):
+            arm_angle = result.get("arm_angle_degrees", 180)
+            hand_x = result.get("hand_x_offset_inches", 0)
+            hand_y = result.get("hand_y_offset_inches", 0)
+            quality = result.get("overall_quality_score", 0.5)
+            
+            if arm_angle < 160:
+                hand_position = "needs_adjustment"
+                priority = "critical" if arm_angle < 150 else "warning"
+                guidance = f"Straighten arms more (current: {arm_angle:.0f}°, target: 170-180°)"
+            elif abs(hand_x) > 2:
+                hand_position = "left" if hand_x < 0 else "right"
+                priority = "warning"
+                guidance = f"Center hands on chest (offset: {abs(hand_x):.1f} inches)"
+            elif abs(hand_y) > 2:
+                hand_position = "high" if hand_y < 0 else "low"
+                priority = "warning" 
+                guidance = f"Adjust hand position {'higher' if hand_y > 0 else 'lower'}"
+            elif quality < 0.6:
+                hand_position = "needs_adjustment"
+                priority = "warning"
+                guidance = "Improve compression technique"
         
-        Key Metrics:
-        - Compression Depth: {analysis_data.get('avg_depth', 'N/A')} inches
-        - Compression Rate: {analysis_data.get('avg_rate', 'N/A')} bpm
-        - Arm Angle: {analysis_data.get('avg_arm_angle', 'N/A')} degrees
-        - Overall Quality: {analysis_data.get('avg_quality', 0) * 100:.1f}%
+        # Update session if provided
+        if session_id and session_id in active_sessions:
+            active_sessions[session_id]["compressions"] = compression_count or 0
+            active_sessions[session_id]["metrics"].append({
+                "compression_count": compression_count,
+                "hand_position": hand_position,
+                "metrics": result
+            })
         
-        Total Compressions: {analysis_data.get('total_compressions', 0)}
-        Duration: {analysis_data.get('duration_seconds', 0)} seconds
-        
-        Please provide:
-        1. What was done well
-        2. Main area for improvement
-        3. One specific tip for next session
-        
-        Keep it encouraging and under 100 words.
-        """
-        
-        # Call OpenAI
-        response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": "You are a helpful CPR training assistant."},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=150,
-            temperature=0.7
-        )
-        
-        summary = response.choices[0].message.content
-        
-        return SummaryResponse(summary=summary)
+        return JSONResponse(content={
+            "analysis": {
+                "position": hand_position,
+                "confidence": result.get("overall_quality_score", 0.7)
+            },
+            "guidance": guidance,
+            "priority": priority,
+            "metrics": result
+        })
         
     except Exception as e:
-        logger.error(f"Error generating summary: {e}")
-        return SummaryResponse(
-            summary="Good effort in this training session! Keep practicing to maintain and improve your CPR skills."
-        )
+        logger.error(f"Error in analyze_hands: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/upload-photo")
+async def upload_photo(
+    file: UploadFile = File(...),
+    user_id: Optional[str] = Form(None),
+    timestamp: Optional[str] = Form(None)
+):
+    """
+    Upload photo endpoint expected by Mentra glasses
+    """
+    try:
+        # Generate filename
+        ts = timestamp or datetime.now().strftime("%Y%m%d_%H%M%S")
+        user = user_id or "unknown"
+        filename = f"upload_{user}_{ts}.jpg"
+        filepath = os.path.join(PHOTOS_DIR, filename)
+        
+        # Save file
+        content = await file.read()
+        with open(filepath, "wb") as f:
+            f.write(content)
+        
+        logger.info(f"Photo uploaded: {filename}")
+        
+        return JSONResponse(content={
+            "success": True,
+            "filename": filename,
+            "message": "Photo uploaded successfully"
+        })
+        
+    except Exception as e:
+        logger.error(f"Error uploading photo: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
-    return {"status": "healthy", "model": "tflite"}
+    return {
+        "status": "healthy",
+        "tflite_loaded": tflite_interpreter is not None,
+        "mediapipe_available": MEDIAPIPE_AVAILABLE
+    }
 
 if __name__ == "__main__":
     # Run the server

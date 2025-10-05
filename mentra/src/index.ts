@@ -2,6 +2,12 @@
 import { AppServer, AppSession } from "@mentra/sdk";
 import fs from "fs";
 import path from "path";
+import { 
+  TranslationManager, 
+  TRANSLATION_COMMANDS, 
+  detectLanguageFromSpeech,
+  type LanguageCode 
+} from "./translation";
 
 // ---------- App config ----------
 const PACKAGE_NAME = process.env.PACKAGE_NAME || "org.movenanter.rsc";
@@ -38,10 +44,14 @@ const SAVE_DIR = path.resolve(process.cwd(), process.env.SAVE_DIR || "hands-posi
 
 // ---------- Types & state ----------
 type BPM = 100 | 110 | 120;
-type AppState = "initialization" | "safety_check" | "responsiveness_check" | "compressions" | "settings";
+type AppState = "initialization" | "safety_check" | "responsiveness_check" | "compressions" | "settings" | "translation";
 
 type IntentName =
   | "START"
+  | "START_TRANSLATION"
+  | "STOP_TRANSLATION"
+  | "SWAP_LANGUAGES"
+  | "CHANGE_TARGET_LANGUAGE"
   | "CONFIRM_SAFETY"
   | "HAZARD_PRESENT"
   | "EMERGENCY_CALLED"
@@ -80,6 +90,7 @@ interface SessionContext {
   unsubscribes: Array<() => void>;
   ttsQueue: string[];
   ttsPlaying: boolean;
+  translationManager?: TranslationManager;
 }
 
 // Settings keys (optional if you set them in console)
@@ -154,6 +165,22 @@ async function classifyIntentWithGemini(
 function classifyIntentHeuristic(text: string, state: AppState): IntentResult {
   const t = norm(text);
 
+  // Translation-specific commands
+  if (/\b(start|begin|activate)\s+(translation|translator|translate)\b/.test(t)) {
+    return { intent: "START_TRANSLATION" };
+  }
+  if (/\b(stop|end|deactivate)\s+(translation|translator|translate)\b/.test(t)) {
+    return { intent: "STOP_TRANSLATION" };
+  }
+  if (/\b(swap|switch|reverse)\s+(language|languages)\b/.test(t)) {
+    return { intent: "SWAP_LANGUAGES" };
+  }
+  if (/\b(change|set)\s+(target\s+)?language\s+to\s+(\w+)\b/.test(t)) {
+    const match = t.match(/\b(change|set)\s+(target\s+)?language\s+to\s+(\w+)\b/);
+    const lang = match ? detectLanguageFromSpeech(match[3]) : null;
+    return { intent: "CHANGE_TARGET_LANGUAGE", meta: { language: lang } };
+  }
+
   if (state === "responsiveness_check") {
     if (/\b(no|nope|nah|negative)\b/.test(t) || /(did\s*(not|n't)\s*respond)/.test(t) || /\b(not\s*respond(ing)?)\b/.test(t) || /\bunresponsive\b/.test(t)) {
       return { intent: "RESPONSIVE_NO" };
@@ -164,7 +191,7 @@ function classifyIntentHeuristic(text: string, state: AppState): IntentResult {
   }
 
   if (/\b(not\s+safe|unsafe|hazard|danger|risky|not\s+clear)\b/.test(t)) return { intent: "HAZARD_PRESENT" };
-  if (/\b(start(ing)?|begin|start over|again)\b/.test(t)) return { intent: "START" };
+  if (/\b(start(ing)?|begin|start over|again)\b/.test(t) && !t.includes("translat")) return { intent: "START" };
   if (/\b(it'?s\s+safe|safe|all\s+clear|clear|it'?s\s+ok(ay)?|we('?re)?\s+good|good\s+to\s+go|looks\s+fine|should\s+be\s+safe|seems\s+safe)\b/.test(t))
     return { intent: "CONFIRM_SAFETY" };
   if (/(i|we).*(called|dialed).*(911|emergency)|\b(911|emergency)\b.*(called|on the line)/.test(t))
@@ -483,7 +510,78 @@ class RescueApp extends AppServer {
     const c = this.ctx(sessionId);
     c.state.currentState = "settings";
     const saveTxt = c.state.saveForQA ? "enabled" : "disabled";
-    await this.queueTTS(session, sessionId, `Settings. Photo saving is ${saveTxt}. Say “back to compressions”.`);
+    await this.queueTTS(session, sessionId, `Settings. Photo saving is ${saveTxt}. Say "back to compressions".`);
+  }
+
+  // Translation methods
+  private async startTranslationMode(session: AppSession, sessionId: string) {
+    const c = this.ctx(sessionId);
+    
+    // Stop any active CPR activities
+    await this.stopAllAudio(session);
+    this.stopMetronome(sessionId);
+    
+    // Initialize translation manager if not exists
+    if (!c.translationManager) {
+      c.translationManager = new TranslationManager();
+    }
+    
+    // Start translation
+    await c.translationManager.start(session, 'es'); // Default to Spanish
+    
+    c.state.currentState = "translation";
+    await this.queueTTS(session, sessionId, "Translation mode started. Translating to Spanish. You can say 'change language' or 'swap languages'.");
+  }
+
+  private async handleTranslationCommands(session: AppSession, sessionId: string, intent: IntentName) {
+    const c = this.ctx(sessionId);
+    
+    if (!c.translationManager || !c.translationManager.isActive()) {
+      await this.queueTTS(session, sessionId, "Translation is not active. Say 'start translation' to begin.");
+      return;
+    }
+
+    switch (intent) {
+      case "SWAP_LANGUAGES":
+        await c.translationManager.swapLanguages();
+        const { sourceLanguage, targetLanguage } = c.translationManager.getLanguages();
+        await this.queueTTS(session, sessionId, `Languages swapped. Now translating from ${this.getLanguageName(sourceLanguage)} to ${this.getLanguageName(targetLanguage)}.`);
+        break;
+        
+      case "CHANGE_TARGET_LANGUAGE":
+        // For simplicity, cycle through common languages
+        const languages: LanguageCode[] = ['es', 'fr', 'de', 'it', 'pt', 'zh', 'ja', 'ko', 'ar', 'hi'];
+        const current = c.translationManager.getLanguages().targetLanguage;
+        const currentIndex = languages.indexOf(current);
+        const nextLanguage = languages[(currentIndex + 1) % languages.length];
+        await c.translationManager.setTargetLanguage(nextLanguage);
+        await this.queueTTS(session, sessionId, `Now translating to ${this.getLanguageName(nextLanguage)}.`);
+        break;
+        
+      case "STOP_TRANSLATION":
+        await c.translationManager.stop();
+        c.state.currentState = "initialization";
+        await this.queueTTS(session, sessionId, "Translation stopped. Returning to CPR mode.");
+        await this.enterWelcome(session, sessionId);
+        break;
+    }
+  }
+
+  private getLanguageName(code: string): string {
+    const languageNames: Record<string, string> = {
+      'en': 'English',
+      'es': 'Spanish',
+      'fr': 'French',
+      'de': 'German',
+      'it': 'Italian',
+      'pt': 'Portuguese',
+      'zh': 'Chinese',
+      'ja': 'Japanese',
+      'ko': 'Korean',
+      'ar': 'Arabic',
+      'hi': 'Hindi'
+    };
+    return languageNames[code] || code;
   }
 
   private async changeBPM(session: AppSession, sessionId: string) {
@@ -526,6 +624,17 @@ class RescueApp extends AppServer {
         setTimeout(() => {
           process.exit(0);
         }, 2000);
+        return;
+      }
+      
+      // Translation commands (global)
+      if (nlu.intent === "START_TRANSLATION") {
+        await this.startTranslationMode(session, sessionId);
+        return;
+      }
+      
+      if (nlu.intent === "STOP_TRANSLATION" || nlu.intent === "SWAP_LANGUAGES" || nlu.intent === "CHANGE_TARGET_LANGUAGE") {
+        await this.handleTranslationCommands(session, sessionId, nlu.intent);
         return;
       }
       if (nlu.intent === "EMERGENCY_CALLED") {
@@ -586,8 +695,20 @@ class RescueApp extends AppServer {
           if (nlu.intent === "BACK_TO_COMPRESSIONS") {
             await this.enterCompressions(session, sessionId);
           } else {
-            await this.queueTTS(session, sessionId, "Say “back to compressions”.");
+            await this.queueTTS(session, sessionId, "Say 'back to compressions'.");
           }
+          break;
+        }
+        case "translation": {
+          // In translation mode, provide help for unrecognized commands
+          if (nlu.intent === "UNKNOWN") {
+            await this.queueTTS(
+              session, 
+              sessionId, 
+              "Translation mode is active. Say 'stop translation' to exit, 'swap languages' to reverse translation, or 'change language' to switch target language."
+            );
+          }
+          // Other translation commands are handled globally above
           break;
         }
       }

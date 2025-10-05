@@ -36,3 +36,5 @@ venv/
 *.egg/
 *.egg-info/
 *.egg-info/
+
+augmented_dataset.zip

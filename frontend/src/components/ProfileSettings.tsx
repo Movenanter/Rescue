@@ -300,55 +300,55 @@ const ProfileSettings: React.FC<ProfileSettingsProps> = ({
               </div>
               
               <div>
-                <label className="block text-sm font-medium text-gray-300 mb-2">Email Address</label>
+                <label className="block text-sm font-medium text-primary-700 mb-2">Email Address</label>
                 <div className="relative">
-                  <Mail className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-400" />
+                  <Mail className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-primary-500" />
                   <input
                     type="email"
                     value={profileData.email}
                     onChange={(e) => handleProfileChange('email', e.target.value)}
-                    className="w-full pl-10 pr-4 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-400 focus:border-blue-400 focus:ring-1 focus:ring-blue-400"
+                    className="w-full pl-10 pr-4 py-2 bg-white border border-primary-200 rounded-lg text-primary-900 placeholder-primary-400 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
                   />
                 </div>
               </div>
               
               <div>
-                <label className="block text-sm font-medium text-gray-300 mb-2">Phone Number</label>
+                <label className="block text-sm font-medium text-primary-700 mb-2">Phone Number</label>
                 <div className="relative">
-                  <Phone className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-400" />
+                  <Phone className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-primary-500" />
                   <input
                     type="tel"
                     value={profileData.phone}
                     onChange={(e) => handleProfileChange('phone', e.target.value)}
-                    className="w-full pl-10 pr-4 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-400 focus:border-blue-400 focus:ring-1 focus:ring-blue-400"
+                    className="w-full pl-10 pr-4 py-2 bg-white border border-primary-200 rounded-lg text-primary-900 placeholder-primary-400 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
                     placeholder="+1 (555) 123-4567"
                   />
                 </div>
               </div>
               
               <div>
-                <label className="block text-sm font-medium text-gray-300 mb-2">Organization</label>
+                <label className="block text-sm font-medium text-primary-700 mb-2">Organization</label>
                 <div className="relative">
-                  <Building className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-400" />
+                  <Building className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-primary-500" />
                   <input
                     type="text"
                     value={profileData.organization}
                     onChange={(e) => handleProfileChange('organization', e.target.value)}
-                    className="w-full pl-10 pr-4 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-400 focus:border-blue-400 focus:ring-1 focus:ring-blue-400"
+                    className="w-full pl-10 pr-4 py-2 bg-white border border-primary-200 rounded-lg text-primary-900 placeholder-primary-400 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
                     placeholder="Metro Emergency Services"
                   />
                 </div>
               </div>
               
               <div>
-                <label className="block text-sm font-medium text-gray-300 mb-2">Role/Position</label>
+                <label className="block text-sm font-medium text-primary-700 mb-2">Role/Position</label>
                 <div className="relative">
-                  <Award className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-400" />
+                  <Award className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-primary-500" />
                   <input
                     type="text"
                     value={profileData.role}
                     onChange={(e) => handleProfileChange('role', e.target.value)}
-                    className="w-full pl-10 pr-4 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-400 focus:border-blue-400 focus:ring-1 focus:ring-blue-400"
+                    className="w-full pl-10 pr-4 py-2 bg-white border border-primary-200 rounded-lg text-primary-900 placeholder-primary-400 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
                     placeholder="Paramedic"
                   />
                 </div>
@@ -357,46 +357,46 @@ const ProfileSettings: React.FC<ProfileSettingsProps> = ({
           </div>
 
           {/* Emergency Contact */}
-          <div className="bg-gray-900 rounded-lg p-6">
-            <h2 className="text-xl font-semibold text-white mb-6">Emergency Contact</h2>
+          <div className="bg-white/70 backdrop-blur-sm rounded-lg p-6 border border-primary-200 shadow-lg">
+            <h2 className="text-xl font-semibold text-primary-900 mb-6">Emergency Contact</h2>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               <div>
-                <label className="block text-sm font-medium text-gray-300 mb-2">Contact Name</label>
+                <label className="block text-sm font-medium text-primary-700 mb-2">Contact Name</label>
                 <input
                   type="text"
                   value={profileData.emergencyContact.name}
                   onChange={(e) => handleEmergencyContactChange('name', e.target.value)}
-                  className="w-full px-4 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-400 focus:border-blue-400 focus:ring-1 focus:ring-blue-400"
+                  className="w-full px-4 py-2 bg-white border border-primary-200 rounded-lg text-primary-900 placeholder-primary-400 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
                 />
               </div>
               
               <div>
-                <label className="block text-sm font-medium text-gray-300 mb-2">Relationship</label>
+                <label className="block text-sm font-medium text-primary-700 mb-2">Relationship</label>
                 <input
                   type="text"
                   value={profileData.emergencyContact.relationship}
                   onChange={(e) => handleEmergencyContactChange('relationship', e.target.value)}
-                  className="w-full px-4 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-400 focus:border-blue-400 focus:ring-1 focus:ring-blue-400"
+                  className="w-full px-4 py-2 bg-white border border-primary-200 rounded-lg text-primary-900 placeholder-primary-400 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
                 />
               </div>
               
               <div>
-                <label className="block text-sm font-medium text-gray-300 mb-2">Contact Email</label>
+                <label className="block text-sm font-medium text-primary-700 mb-2">Contact Email</label>
                 <input
                   type="email"
                   value={profileData.emergencyContact.email}
                   onChange={(e) => handleEmergencyContactChange('email', e.target.value)}
-                  className="w-full px-4 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-400 focus:border-blue-400 focus:ring-1 focus:ring-blue-400"
+                  className="w-full px-4 py-2 bg-white border border-primary-200 rounded-lg text-primary-900 placeholder-primary-400 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
                 />
               </div>
               
               <div>
-                <label className="block text-sm font-medium text-gray-300 mb-2">Contact Phone</label>
+                <label className="block text-sm font-medium text-primary-700 mb-2">Contact Phone</label>
                 <input
                   type="tel"
                   value={profileData.emergencyContact.phone}
                   onChange={(e) => handleEmergencyContactChange('phone', e.target.value)}
-                  className="w-full px-4 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-400 focus:border-blue-400 focus:ring-1 focus:ring-blue-400"
+                  className="w-full px-4 py-2 bg-white border border-primary-200 rounded-lg text-primary-900 placeholder-primary-400 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
                 />
               </div>
             </div>
@@ -408,13 +408,13 @@ const ProfileSettings: React.FC<ProfileSettingsProps> = ({
       {activeTab === 'preferences' && (
         <div className="space-y-8">
           {/* Notification Preferences */}
-          <div className="bg-gray-900 rounded-lg p-6">
-            <h2 className="text-xl font-semibold text-white mb-6">Notification Preferences</h2>
+          <div className="bg-white/70 backdrop-blur-sm rounded-lg p-6 border border-primary-200 shadow-lg">
+            <h2 className="text-xl font-semibold text-primary-900 mb-6">Notification Preferences</h2>
             <div className="space-y-4">
               <div className="flex items-center justify-between">
                 <div>
-                  <h3 className="text-white font-medium">Email Notifications</h3>
-                  <p className="text-gray-400 text-sm">Receive training reminders and session reports via email</p>
+                  <h3 className="text-primary-900 font-medium">Email Notifications</h3>
+                  <p className="text-primary-600 text-sm">Receive training reminders and session reports via email</p>
                 </div>
                 <label className="relative inline-flex items-center cursor-pointer">
                   <input
@@ -423,14 +423,14 @@ const ProfileSettings: React.FC<ProfileSettingsProps> = ({
                     onChange={(e) => handlePreferencesChange('emailNotifications', e.target.checked)}
                     className="sr-only peer"
                   />
-                  <div className="w-11 h-6 bg-gray-700 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                  <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
                 </label>
               </div>
               
               <div className="flex items-center justify-between">
                 <div>
-                  <h3 className="text-white font-medium">SMS Notifications</h3>
-                  <p className="text-gray-400 text-sm">Receive urgent notifications via text message</p>
+                  <h3 className="text-primary-900 font-medium">SMS Notifications</h3>
+                  <p className="text-primary-600 text-sm">Receive urgent notifications via text message</p>
                 </div>
                 <label className="relative inline-flex items-center cursor-pointer">
                   <input
@@ -439,22 +439,22 @@ const ProfileSettings: React.FC<ProfileSettingsProps> = ({
                     onChange={(e) => handlePreferencesChange('smsNotifications', e.target.checked)}
                     className="sr-only peer"
                   />
-                  <div className="w-11 h-6 bg-gray-700 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                  <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
                 </label>
               </div>
             </div>
           </div>
 
           {/* App Preferences */}
-          <div className="bg-gray-900 rounded-lg p-6">
-            <h2 className="text-xl font-semibold text-white mb-6">App Preferences</h2>
+          <div className="bg-white/70 backdrop-blur-sm rounded-lg p-6 border border-primary-200 shadow-lg">
+            <h2 className="text-xl font-semibold text-primary-900 mb-6">App Preferences</h2>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               <div>
-                <label className="block text-sm font-medium text-gray-300 mb-2">Language</label>
+                <label className="block text-sm font-medium text-primary-700 mb-2">Language</label>
                 <select
                   value={preferences.language}
                   onChange={(e) => handlePreferencesChange('language', e.target.value)}
-                  className="w-full px-4 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:border-blue-400 focus:ring-1 focus:ring-blue-400"
+                  className="w-full px-4 py-2 bg-white border border-primary-200 rounded-lg text-primary-900 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
                 >
                   <option value="en">English</option>
                   <option value="es">Español</option>
@@ -463,11 +463,11 @@ const ProfileSettings: React.FC<ProfileSettingsProps> = ({
               </div>
               
               <div>
-                <label className="block text-sm font-medium text-gray-300 mb-2">Theme</label>
+                <label className="block text-sm font-medium text-primary-700 mb-2">Theme</label>
                 <select
                   value={preferences.theme}
                   onChange={(e) => handlePreferencesChange('theme', e.target.value)}
-                  className="w-full px-4 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:border-blue-400 focus:ring-1 focus:ring-blue-400"
+                  className="w-full px-4 py-2 bg-white border border-primary-200 rounded-lg text-primary-900 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
                 >
                   <option value="true">Dark</option>
                   <option value="light">Light</option>
@@ -478,15 +478,15 @@ const ProfileSettings: React.FC<ProfileSettingsProps> = ({
           </div>
 
           {/* Training Preferences */}
-          <div className="bg-gray-900 rounded-lg p-6">
-            <h2 className="text-xl font-semibold text-white mb-6">Training Preferences</h2>
+          <div className="bg-white/70 backdrop-blur-sm rounded-lg p-6 border border-primary-200 shadow-lg">
+            <h2 className="text-xl font-semibold text-primary-900 mb-6">Training Preferences</h2>
             <div className="space-y-4">
               <div className="flex items-center justify-between">
                 <div className="flex items-center space-x-3">
-                  <Volume2 className="w-5 h-5 text-gray-400" />
+                  <Volume2 className="w-5 h-5 text-primary-500" />
                   <div>
-                    <h3 className="text-white font-medium">Metronome</h3>
-                    <p className="text-gray-400 text-sm">Enable rhythm guidance during training</p>
+                    <h3 className="text-primary-900 font-medium">Metronome</h3>
+                    <p className="text-primary-600 text-sm">Enable rhythm guidance during training</p>
                   </div>
                 </div>
                 <label className="relative inline-flex items-center cursor-pointer">
@@ -496,16 +496,16 @@ const ProfileSettings: React.FC<ProfileSettingsProps> = ({
                     onChange={(e) => handlePreferencesChange('metronomeEnabled', e.target.checked)}
                     className="sr-only peer"
                   />
-                  <div className="w-11 h-6 bg-gray-700 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                  <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
                 </label>
               </div>
               
               <div className="flex items-center justify-between">
                 <div className="flex items-center space-x-3">
-                  <Mic className="w-5 h-5 text-gray-400" />
+                  <Mic className="w-5 h-5 text-primary-500" />
                   <div>
-                    <h3 className="text-white font-medium">Voice Coaching</h3>
-                    <p className="text-gray-400 text-sm">Enable audio feedback during training</p>
+                    <h3 className="text-primary-900 font-medium">Voice Coaching</h3>
+                    <p className="text-primary-600 text-sm">Enable audio feedback during training</p>
                   </div>
                 </div>
                 <label className="relative inline-flex items-center cursor-pointer">
@@ -515,7 +515,7 @@ const ProfileSettings: React.FC<ProfileSettingsProps> = ({
                     onChange={(e) => handlePreferencesChange('voiceCoaching', e.target.checked)}
                     className="sr-only peer"
                   />
-                  <div className="w-11 h-6 bg-gray-700 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                  <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
                 </label>
               </div>
             </div>
@@ -527,13 +527,13 @@ const ProfileSettings: React.FC<ProfileSettingsProps> = ({
       {activeTab === 'security' && (
         <div className="space-y-8">
           {/* CPR Certification */}
-          <div className="bg-gray-900 rounded-lg p-6">
-            <h2 className="text-xl font-semibold text-white mb-6">CPR Certification</h2>
+          <div className="bg-white/70 backdrop-blur-sm rounded-lg p-6 border border-primary-200 shadow-lg">
+            <h2 className="text-xl font-semibold text-primary-900 mb-6">CPR Certification</h2>
             <div className="space-y-4">
               <div className="flex items-center space-x-3">
                 <Shield className={`w-6 h-6 ${certStatus.color}`} />
                 <div>
-                  <h3 className="text-white font-medium">Certification Status</h3>
+                  <h3 className="text-primary-900 font-medium">Certification Status</h3>
                   <p className={`text-sm ${certStatus.color}`}>
                     {user.isCprCertified 
                       ? (certStatus.status === 'valid' ? 'Valid' : 
@@ -546,10 +546,10 @@ const ProfileSettings: React.FC<ProfileSettingsProps> = ({
               </div>
               
               <div className="flex items-center space-x-3">
-                <Calendar className="w-5 h-5 text-gray-400" />
+                <Calendar className="w-5 h-5 text-primary-500" />
                 <div>
-                  <h3 className="text-white font-medium">Expiry Date</h3>
-                  <p className="text-gray-400 text-sm">{formatCertificationExpiry(user.certificationExpiry)}</p>
+                  <h3 className="text-primary-900 font-medium">Expiry Date</h3>
+                  <p className="text-primary-600 text-sm">{formatCertificationExpiry(user.certificationExpiry)}</p>
                 </div>
               </div>
               
@@ -576,20 +576,20 @@ const ProfileSettings: React.FC<ProfileSettingsProps> = ({
           </div>
 
           {/* Training History */}
-          <div className="bg-gray-900 rounded-lg p-6">
-            <h2 className="text-xl font-semibold text-white mb-6">Training History</h2>
+          <div className="bg-white/70 backdrop-blur-sm rounded-lg p-6 border border-primary-200 shadow-lg">
+            <h2 className="text-xl font-semibold text-primary-900 mb-6">Training History</h2>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              <div className="bg-gray-800 rounded-lg p-4">
-                <h3 className="text-white font-medium">Total Sessions</h3>
-                <p className="text-2xl font-bold text-blue-400">{user.trainingHistory?.totalSessions || 0}</p>
+              <div className="bg-gray-50 rounded-lg p-4">
+                <h3 className="text-primary-900 font-medium">Total Sessions</h3>
+                <p className="text-2xl font-bold text-blue-600">{user.trainingHistory?.totalSessions || 0}</p>
               </div>
-              <div className="bg-gray-800 rounded-lg p-4">
-                <h3 className="text-white font-medium">Average Score</h3>
-                <p className="text-2xl font-bold text-green-400">{user.trainingHistory?.averageScore || 0}%</p>
+              <div className="bg-gray-50 rounded-lg p-4">
+                <h3 className="text-primary-900 font-medium">Average Score</h3>
+                <p className="text-2xl font-bold text-green-600">{user.trainingHistory?.averageScore || 0}%</p>
               </div>
-              <div className="bg-gray-800 rounded-lg p-4">
-                <h3 className="text-white font-medium">Last Session</h3>
-                <p className="text-sm text-gray-400">
+              <div className="bg-gray-50 rounded-lg p-4">
+                <h3 className="text-primary-900 font-medium">Last Session</h3>
+                <p className="text-sm text-primary-600">
                   {user.trainingHistory?.lastSession 
                     ? user.trainingHistory.lastSession.toLocaleDateString()
                     : 'No sessions yet'

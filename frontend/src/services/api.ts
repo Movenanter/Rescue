@@ -10,10 +10,12 @@ interface ApiResponse<T> {
 }
 
 interface HealthCheckResponse {
-  message: string
-  status: string
-  models_loaded: boolean
+  service: string
   version: string
+  status: string
+  tflite_model: string
+  mediapipe: string
+  active_sessions: number
 }
 
 interface AnalyzHandResponse {
@@ -61,11 +63,12 @@ export const apiService = {
   },
 
   // Analyze CPR hands positioning
-  async analyzeHands(imageFile: File): Promise<AnalyzHandResponse> {
+  async analyzeHands(imageFile: File, sessionId?: string): Promise<AnalyzHandResponse> {
     const formData = new FormData()
     formData.append('file', imageFile)
+    if (sessionId) formData.append('session_id', sessionId)
     
-    const response = await apiClient.post<AnalyzHandResponse>('/analyze-hands', formData, {
+    const response = await apiClient.post<AnalyzHandResponse>('/analyze-pose', formData, {
       headers: {
         'Content-Type': 'multipart/form-data',
       },
@@ -103,20 +106,22 @@ export const apiService = {
     return response.data.summary
   },
 
-  // Session management endpoints (mock for now)
-  async getSessions(userId?: string) {
-    // TODO: Implement when backend session management is ready
-    return []
+  // Session management endpoints
+  async getSessions() {
+    const response = await apiClient.get('/sessions')
+    return response.data
   },
 
-  async getSession(sessionId: string): Promise<CPRSession> {
-    // TODO: Implement when backend session management is ready
-    throw new Error('Session endpoint not implemented yet')
+  async getSession(sessionId: string) {
+    const response = await apiClient.get(`/session/${sessionId}`)
+    return response.data
   },
 
-  async createSession(userId: string, trialType: 'practice' | 'real'): Promise<CPRSession> {
-    // TODO: Implement when backend session management is ready
-    throw new Error('Create session endpoint not implemented yet')
+  async createSession(deviceId: string = 'web-app') {
+    const response = await apiClient.post('/start-session', null, {
+      params: { device_id: deviceId }
+    })
+    return response.data
   },
 
   async endSession(sessionId: string): Promise<AfterActionReport> {
