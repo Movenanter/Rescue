@@ -26,8 +26,9 @@ const PREWARM = (process.env.PREWARM || "1") === "1"; // warm decoder to avoid f
 // ---------- TTS config ----------
 const TTS_SPEED = Math.max(0.5, Math.min(2.0, Number(process.env.TTS_SPEED || "1.1"))); // default 1.1x
 
-// ---------- Gemini 2.5 (optional NLU) ----------
+// ---------- Gemini (for hand position analysis) ----------
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
+// Using gemini-2.5-flash: latest and fastest model for speed-critical tasks
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 const GEMINI_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
   GEMINI_MODEL
@@ -38,7 +39,7 @@ const SAVE_DIR = path.resolve(process.cwd(), process.env.SAVE_DIR || "hands-posi
 
 // ---------- Types & state ----------
 type BPM = 100 | 110 | 120;
-type AppState = "initialization" | "safety_check" | "responsiveness_check" | "compressions" | "settings";
+type AppState = "initialization" | "safety_check" | "responsiveness_check" | "cpr_guidance" | "compressions" | "settings";
 
 type IntentName =
   | "START"
@@ -51,6 +52,8 @@ type IntentName =
   | "CHANGE_BPM"
   | "OPEN_SETTINGS"
   | "BACK_TO_COMPRESSIONS"
+  | "SKIP_GUIDANCE"
+  | "SHUTDOWN"
   | "UNKNOWN";
 
 interface IntentResult {
@@ -67,6 +70,8 @@ interface RescueSessionState {
 
   speechGuardUntil?: number;       // voice prompts only (NEVER pauses beats)
   metronomeTimer?: NodeJS.Timeout; // setTimeout handle
+  handCheckTimer?: NodeJS.Timeout; // timer for automatic hand position checks
+  guidanceTimer?: NodeJS.Timeout;  // timer for periodic CPR guidance reminders
 }
 
 interface SessionContext {
@@ -103,11 +108,12 @@ const INTENT_SYSTEM_PROMPT = `
 You are an intent classifier for a voice-only CPR coaching app.
 Return ONLY JSON with key "intent" (and optional "meta").
 Valid intent values:
-START, CONFIRM_SAFETY, HAZARD_PRESENT, EMERGENCY_CALLED, RESPONSIVE_YES, RESPONSIVE_NO,
-CHECK_HANDS, CHANGE_BPM, OPEN_SETTINGS, BACK_TO_COMPRESSIONS, UNKNOWN
+START, CONFIRM_SAFETY, HAZARD_PRESENT, EMERGENCY_CALLED, RESPONSIVE_YES, RESPONSIVE_NO, 
+CHECK_HANDS, CHANGE_BPM, OPEN_SETTINGS, BACK_TO_COMPRESSIONS, SKIP_GUIDANCE, SHUTDOWN, UNKNOWN
 
 Classify by meaning and intent, not keywords.
 If the user is answering whether the person responded, interpret short answers like "yes", "no" accordingly.
+For shutdown commands, recognize: "shutdown", "quit", "exit", "stop app", "close app", "turn off".
 Output must be JSON only (no prose).
 `;
 
@@ -146,30 +152,40 @@ async function classifyIntentWithGemini(
 function classifyIntentHeuristic(text: string, state: AppState): IntentResult {
   const t = norm(text);
 
+  // State-specific intent classification (highest priority)
   if (state === "responsiveness_check") {
-    if (/\b(no|nope|nah|negative)\b/.test(t) || /(did\s*(not|n't)\s*respond)/.test(t) || /\b(not\s*respond(ing)?)\b/.test(t) || /\bunresponsive\b/.test(t)) {
+    if (/\b(no|nope|nah|negative|didn'?t respond|not responding|unresponsive|won'?t wake|isn'?t waking)\b/.test(t)) {
       return { intent: "RESPONSIVE_NO" };
     }
-    if (/\b(yes|yeah|yep|affirmative|they did respond|they responded|they answered|responding)\b/.test(t)) {
+    if (/\b(yes|yeah|yep|affirmative|they did respond|they responded|they answered|responding|they'?re ok|they'?re okay|responsive|came to)\b/.test(t)) {
       return { intent: "RESPONSIVE_YES" };
     }
+    // In responsiveness_check, don't classify safety-related intents
+    return { intent: "UNKNOWN" };
   }
 
-  if (/\b(not\s+safe|unsafe|hazard|danger|risky|not\s+clear)\b/.test(t)) return { intent: "HAZARD_PRESENT" };
+  if (state === "safety_check") {
+    if (/\b(not\s+safe|unsafe|hazard|danger|risky|not\s+clear)\b/.test(t)) {
+      return { intent: "HAZARD_PRESENT" };
+    }
+    if (/\b(it'?s\s+safe|safe|all\s+clear|clear|it'?s\s+ok(ay)?|we('?re)?\s+good|good\s+to\s+go|looks\s+fine|should\s+be\s+safe|seems\s+safe)\b/.test(t)) {
+      return { intent: "CONFIRM_SAFETY" };
+    }
+    // In safety_check, don't classify responsiveness-related intents
+    return { intent: "UNKNOWN" };
+  }
+
+  // Global intents (work in any state)
   if (/\b(start(ing)?|begin|start over|again)\b/.test(t)) return { intent: "START" };
-  if (/\b(it'?s\s+safe|safe|all\s+clear|clear|it'?s\s+ok(ay)?|we('?re)?\s+good|good\s+to\s+go|looks\s+fine|should\s+be\s+safe|seems\s+safe)\b/.test(t))
-    return { intent: "CONFIRM_SAFETY" };
   if (/(i|we).*(called|dialed).*(911|emergency)|\b(911|emergency)\b.*(called|on the line)/.test(t))
     return { intent: "EMERGENCY_CALLED" };
-  if (/\b(responding|they answered|they'?re ok|they'?re okay|responsive|came to)\b/.test(t))
-    return { intent: "RESPONSIVE_YES" };
-  if (/\b(no response|not responding|unresponsive|won'?t wake|isn'?t waking)\b/.test(t) || /(did\s*(not|n't)\s*respond)/.test(t))
-    return { intent: "RESPONSIVE_NO" };
   if (/\b(check|center|hands|position|placement)\b/.test(t)) return { intent: "CHECK_HANDS" };
   if (/\b(change.*(speed|bpm)|speed\s*up|slow\s*down|faster|slower|increase\s*speed|decrease\s*speed)\b/.test(t))
     return { intent: "CHANGE_BPM" };
   if (/\b(settings|open settings|configure)\b/.test(t)) return { intent: "OPEN_SETTINGS" };
   if (/\b(back|resume compressions|go back)\b/.test(t)) return { intent: "BACK_TO_COMPRESSIONS" };
+  if (/\b(skip|skip guidance|skip instructions|start compressions|start now|go ahead|begin|ready)\b/.test(t)) return { intent: "SKIP_GUIDANCE" };
+  if (/\b(shutdown|quit|exit|stop app|close app|turn off)\b/.test(t)) return { intent: "SHUTDOWN" };
 
   return { intent: "UNKNOWN" };
 }
@@ -276,6 +292,9 @@ class RescueApp extends AppServer {
       clearTimeout(c.state.metronomeTimer as unknown as NodeJS.Timeout);
       c.state.metronomeTimer = undefined;
     }
+    // Also stop hand check timer and guidance timer when stopping metronome
+    this.stopHandCheckTimer(sessionId);
+    this.stopCPRGuidanceTimer(sessionId);
   }
 
   // ---- Photo capture + optional local save to SAVE_DIR ----
@@ -292,15 +311,22 @@ class RescueApp extends AppServer {
     await this.queueTTS(session, sessionId, "Taking a quick photo to check hand position.");
 
     try {
-      const photo: any = await session.camera.requestPhoto({ size: "small" });
+      const photo: any = await session.camera.requestPhoto({});
       const buf: Buffer = Buffer.isBuffer(photo?.buffer) ? photo.buffer : Buffer.from(photo?.buffer ?? []);
 
       session.logger.info(
         `Photo captured: name=${photo?.filename ?? "n/a"} bytes=${buf.byteLength} mime=${photo?.mimeType ?? "image/jpeg"}`
       );
 
-      // Try to analyze hands using backend, fallback to mock if backend fails
-      const analysis = await this.analyzeHandsWithBackend(buf, photo?.mimeType ?? "image/jpeg");
+      // Try to analyze hands using Gemini API first, then fallback to backend
+      let analysis;
+      if (GEMINI_API_KEY) {
+        console.log("Using Gemini API for analysis (API key configured)");
+        analysis = await this.analyzeHandsWithGemini(buf, photo?.mimeType ?? "image/jpeg");
+      } else {
+        console.log("Using backend for analysis (no Gemini API key)");
+        analysis = await this.analyzeHandsWithBackend(buf, photo?.mimeType ?? "image/jpeg");
+      }
       
       // Generate guidance message
       const guidanceMessages = {
@@ -309,14 +335,25 @@ class RescueApp extends AppServer {
         "low": "Hands are too low. Move up toward the center of the chest.",
         "left": "Move hands slightly to the right, toward the center of the chest.",
         "right": "Move hands slightly to the left, toward the center of the chest.",
-        "uncertain": "Hand position unclear. Try to center hands on the chest."
+        "uncertain": "Hand position unclear. Try to center hands on the chest.",
+        "no_cpr": "No CPR in progress."
       };
       
-      const guidance = guidanceMessages[analysis.position as keyof typeof guidanceMessages] || "Continue with compressions.";
-      await this.queueTTS(session, sessionId, guidance);
+      // Additional fallback: if we get "uncertain" but the analysis confidence is low, 
+      // it might be because no CPR is happening
+      let finalGuidance = guidanceMessages[analysis.position as keyof typeof guidanceMessages] || "Continue with compressions.";
+      
+      if (analysis.position === "uncertain" && analysis.confidence < 0.5) {
+        finalGuidance = "No CPR detected.";
+      }
+      
+      console.log(`Analysis result: position="${analysis.position}", confidence=${analysis.confidence}`);
+      console.log(`Selected guidance: "${finalGuidance}"`);
+      
+      await this.queueTTS(session, sessionId, finalGuidance);
 
       // Try to upload to backend, but always save locally as backup
-      const backendSuccess = await this.uploadPhotoToAPI(buf, photo?.mimeType ?? "image/jpeg", sessionId);
+      const backendSuccess = await this.uploadPhotoToAPI(buf, photo?.mimeType ?? "image/jpeg", sessionId, analysis, finalGuidance);
       
       // Always save locally (either as primary or backup)
       try { 
@@ -332,19 +369,27 @@ class RescueApp extends AppServer {
         session.logger.info(`Backend unavailable - hands photo saved locally only: ${outPath}`);
       }
     } catch (err) {
-      session.logger.error("Photo capture failed:", err);
+      session.logger.error(`Photo capture failed: ${String(err)}`);
       await this.queueTTS(session, sessionId, "I couldn't take a photo. Keep compressions centered on the chest.");
     }
   }
 
   // ---- Backend integration ----
-  private async uploadPhotoToAPI(buffer: Buffer, mimeType: string, sessionId: string): Promise<boolean> {
+  private async uploadPhotoToAPI(buffer: Buffer, mimeType: string, sessionId: string, analysis?: { position: string; confidence: number }, guidance?: string): Promise<boolean> {
     try {
       const formData = new FormData();
-      const blob = new Blob([buffer], { type: mimeType });
+      const blob = new Blob([new Uint8Array(buffer)], { type: mimeType });
       formData.append("file", blob, `cpr_${sessionId}_${Date.now()}.jpg`);
       formData.append("user_id", sessionId);
       formData.append("timestamp", new Date().toISOString());
+      
+      // Send the analysis results from Mentra glasses
+      if (analysis) {
+        formData.append("mentra_analysis", JSON.stringify(analysis));
+      }
+      if (guidance) {
+        formData.append("mentra_guidance", guidance);
+      }
 
       const response = await fetch("http://localhost:8000/upload-photo", {
         method: "POST",
@@ -363,12 +408,116 @@ class RescueApp extends AppServer {
     }
   }
 
+  private async analyzeHandsWithGemini(buffer: Buffer, mimeType: string): Promise<{ position: string; confidence: number }> {
+    try {
+      if (!GEMINI_API_KEY) {
+        throw new Error("GEMINI_API_KEY not configured");
+      }
+
+      const base64Image = buffer.toString('base64');
+      
+      const requestBody = {
+        contents: [{
+          parts: [{
+            text: "CPR hand position analysis. Look for hands on chest center. Respond with ONE word only:\nno_cpr|good|high|low|left|right|uncertain"
+          }, {
+            inline_data: {
+              mime_type: mimeType,
+              data: base64Image
+            }
+          }]
+        }],
+        generationConfig: {
+          temperature: 0.0,
+          maxOutputTokens: 500, // Much higher to account for internal thoughts
+          topP: 0.1,
+          topK: 1,
+          // Additional optimizations for Flash model speed
+          stopSequences: [], // No stop sequences for faster processing
+          candidateCount: 1  // Only generate one response for speed
+        }
+      };
+
+      const startTime = Date.now();
+      const response = await fetch(`${GEMINI_ENDPOINT}?key=${GEMINI_API_KEY}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(requestBody),
+        // Add timeout for faster failure detection
+        signal: AbortSignal.timeout(10000) // 10 second timeout
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`🚨 Gemini API failed: ${response.status} ${response.statusText}`, errorText);
+        
+        // Handle quota exceeded error specifically
+        if (response.status === 429) {
+          console.warn("⚠️ Gemini API quota exceeded - falling back to basic analysis");
+          return {
+            position: "uncertain",
+            confidence: 0.5
+          };
+        }
+        
+        throw new Error(`Gemini API failed: ${response.statusText}`);
+      }
+
+      const result = await response.json();
+      console.log('📡 Gemini API response status:', response.status);
+      const endTime = Date.now();
+      const duration = endTime - startTime;
+      
+      console.log(`⚡ Gemini analysis completed in ${duration}ms`);
+      
+      if (duration > 3000) {
+        console.warn(`⚠️ Slow Gemini response: ${duration}ms (consider optimizing)`);
+      }
+      
+      console.log('🔍 Full Gemini response structure:', JSON.stringify(result, null, 2));
+      
+      const rawText = result.candidates?.[0]?.content?.parts?.[0]?.text?.toLowerCase().trim();
+      
+      console.log(`🔍 Raw text extracted: "${rawText}"`);
+      
+      // Handle case where rawText is undefined or null
+      if (!rawText) {
+        console.warn('⚠️ No text found in Gemini response, using fallback');
+        return {
+          position: "uncertain",
+          confidence: 0.1
+        };
+      }
+      
+      // Extract the first valid position from response (in case of extra text)
+      const validPositions = ["good", "high", "low", "left", "right", "uncertain", "no_cpr"];
+      const position = validPositions.find(pos => rawText.includes(pos)) || "uncertain";
+      
+      console.log(`📝 Gemini raw response: "${rawText}" -> parsed: "${position}"`);
+      
+      // High confidence for clear responses, lower for uncertain
+      const confidence = position === "uncertain" ? 0.3 : 
+                        position === "no_cpr" ? 0.95 : 0.9;
+      
+      return { position, confidence };
+    } catch (error) {
+      console.error("Gemini analysis failed:", error);
+      return {
+        position: "uncertain",
+        confidence: 0.0
+      };
+    }
+  }
+
   private async analyzeHandsWithBackend(buffer: Buffer, mimeType: string): Promise<{ position: string; confidence: number }> {
     try {
       const formData = new FormData();
-      const blob = new Blob([buffer], { type: mimeType });
+      const blob = new Blob([new Uint8Array(buffer)], { type: mimeType });
       formData.append("file", blob, `hands_${Date.now()}.jpg`);
 
+      const startTime = Date.now();
       const response = await fetch("http://localhost:8000/analyze-hands", {
         method: "POST",
         body: formData,
@@ -379,12 +528,25 @@ class RescueApp extends AppServer {
       }
 
       const result = await response.json();
-      return result.analysis;
+      const endTime = Date.now();
+      const duration = endTime - startTime;
+      
+      console.log(`Backend analysis completed in ${duration}ms`);
+      
+      // Ensure the backend result includes the new "no_cpr" position
+      const validPositions = ["good", "high", "low", "left", "right", "uncertain", "no_cpr"];
+      const position = validPositions.includes(result.analysis?.position) ? result.analysis.position : "uncertain";
+      
+      return {
+        position,
+        confidence: result.analysis?.confidence || 0.5
+      };
     } catch (error) {
       console.error("Backend analysis failed, using fallback:", error);
-      // Fallback to mock analysis
+      // Fallback to mock analysis - include "no_cpr" in possible responses
+      const positions = ["good", "high", "low", "left", "right", "uncertain", "no_cpr"];
       return {
-        position: ["good", "high", "low", "left", "right", "uncertain"][Math.floor(Math.random() * 6)],
+        position: positions[Math.floor(Math.random() * positions.length)],
         confidence: Math.random() * 0.4 + 0.6
       };
     }
@@ -419,19 +581,215 @@ class RescueApp extends AppServer {
   }
   private async enterCompressions(session: AppSession, sessionId: string) {
     const c = this.ctx(sessionId);
-    c.state.currentState = "compressions";
-    c.state.speechGuardUntil = Date.now() + 2200; // info only
+    c.state.currentState = "cpr_guidance";
+    
+    // Step-by-step CPR guidance
+    await this.guideThroughCPRProcess(session, sessionId);
+  }
+
+  private async guideThroughCPRProcess(session: AppSession, sessionId: string) {
+    const c = this.ctx(sessionId);
+    
+    // Check if we're still in guidance state before each step
+    if (c.state.currentState !== "cpr_guidance") {
+      console.log("⚠️ Guidance interrupted - state changed to:", c.state.currentState);
+      return;
+    }
+    
+    // Introduction with skip option
     await session.audio.speak(
-      `Starting compressions at ${c.state.metronomeBPM} beats per minute.`,
+      "I'll guide you through the CPR process step by step. You can skip if needed.",
       { voice_settings: { speed: TTS_SPEED } }
     );
-    setTimeout(() => this.startMetronome(session, sessionId), 450);
+    await this.delay(3000);
+    
+    // Step 1: Position the person
+    await session.audio.speak(
+      "Step 1: Position the person. Lay them on their back on a firm, flat surface. Remove any clothing from their chest.",
+      { voice_settings: { speed: TTS_SPEED } }
+    );
+    await this.delay(3000); // Wait 3 seconds between instructions
+
+    // Check state before continuing
+    if (c.state.currentState !== "cpr_guidance") return;
+
+    // Step 2: Hand positioning
+    await session.audio.speak(
+      "Step 2: Position your hands. Place the heel of one hand in the center of the chest, between the nipples. Place your other hand on top and interlock your fingers.",
+      { voice_settings: { speed: TTS_SPEED } }
+    );
+    await this.delay(4000);
+
+    // Check state before continuing
+    if (c.state.currentState !== "cpr_guidance") return;
+
+    // Step 3: Body position
+    await session.audio.speak(
+      "Step 3: Position your body. Kneel beside the person. Keep your shoulders directly over your hands and your arms straight.",
+      { voice_settings: { speed: TTS_SPEED } }
+    );
+    await this.delay(3000);
+
+    // Check state before continuing
+    if (c.state.currentState !== "cpr_guidance") return;
+
+    // Step 4: Compression technique
+    await session.audio.speak(
+      "Step 4: Compression technique. Press down hard and fast. Compress the chest at least 2 inches deep. Let the chest rise completely between compressions.",
+      { voice_settings: { speed: TTS_SPEED } }
+    );
+    await this.delay(4000);
+
+    // Check state before continuing
+    if (c.state.currentState !== "cpr_guidance") return;
+
+    // Step 5: Rate and rhythm
+    await session.audio.speak(
+      `Step 5: Rate and rhythm. Compress at a rate of ${c.state.metronomeBPM} compressions per minute. That's about 2 compressions per second. The metronome will help you maintain the correct rhythm.`,
+      { voice_settings: { speed: TTS_SPEED } }
+    );
+    await this.delay(5000);
+
+    // Check state before continuing
+    if (c.state.currentState !== "cpr_guidance") return;
+
+    // Step 6: Duration and rescue breaths
+    await session.audio.speak(
+      "Step 6: Continue compressions. Give 30 compressions, then 2 rescue breaths if you're trained. If not trained in rescue breaths, continue with compressions only. Continue until help arrives or the person shows signs of life.",
+      { voice_settings: { speed: TTS_SPEED } }
+    );
+    await this.delay(5000);
+
+    // Final instruction before starting
+    await session.audio.speak(
+      "You're ready to begin CPR. I'll start the metronome now to help you maintain the correct rhythm. Remember to keep your hands centered on the chest and compress deeply.",
+      { voice_settings: { speed: TTS_SPEED } }
+    );
+    await this.delay(3000);
+
+    // Set state to compressions and start the metronome, hand checking, and guidance
+    c.state.currentState = "compressions";
+    this.startMetronome(session, sessionId);
+    setTimeout(() => this.startHandCheckTimer(session, sessionId), 1000);
+    setTimeout(() => this.startCPRGuidanceTimer(session, sessionId), 2000);
+  }
+
+  private delay(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  private async skipToCompressions(session: AppSession, sessionId: string) {
+    const c = this.ctx(sessionId);
+    
+    // Stop ALL ongoing processes immediately
+    if (c.state.guidanceTimer) {
+      clearTimeout(c.state.guidanceTimer);
+      c.state.guidanceTimer = undefined;
+    }
+    if (c.state.handCheckTimer) {
+      clearTimeout(c.state.handCheckTimer);
+      c.state.handCheckTimer = undefined;
+    }
+    
+    // Set state to compressions and start everything
+    c.state.currentState = "compressions";
+    
+    await session.audio.speak(
+      "Skipping guidance. Starting compressions now.",
+      { voice_settings: { speed: TTS_SPEED } }
+    );
+    await this.delay(1500);
+    
+    // Start the metronome, hand checking, and guidance
+    this.startMetronome(session, sessionId);
+    setTimeout(() => this.startHandCheckTimer(session, sessionId), 1000);
+    setTimeout(() => this.startCPRGuidanceTimer(session, sessionId), 2000);
   }
   private async enterSettings(session: AppSession, sessionId: string) {
     const c = this.ctx(sessionId);
     c.state.currentState = "settings";
     const saveTxt = c.state.saveForQA ? "enabled" : "disabled";
-    await this.queueTTS(session, sessionId, `Settings. Photo saving is ${saveTxt}. Say “back to compressions”.`);
+    await this.queueTTS(session, sessionId, `Settings. Photo saving is ${saveTxt}. Say "back to compressions".`);
+  }
+
+  // Start automatic hand position checking every 3 seconds
+  private startHandCheckTimer(session: AppSession, sessionId: string) {
+    const c = this.ctx(sessionId);
+    
+    // Clear any existing timer
+    if (c.state.handCheckTimer) {
+      clearTimeout(c.state.handCheckTimer);
+    }
+    
+    // Start new timer
+    const checkHands = async () => {
+      if (c.state.currentState === "compressions") {
+        await this.captureHandsPhoto(session, sessionId);
+        // Schedule next check in 5 seconds (frequent feedback for better training)
+        c.state.handCheckTimer = setTimeout(checkHands, 5000);
+      }
+    };
+    
+    // Start the first check
+    c.state.handCheckTimer = setTimeout(checkHands, 5000); // Start after 5 seconds
+    console.log("🔄 Started automatic hand position checking every 5 seconds");
+  }
+
+  // Add periodic CPR guidance reminders during compressions
+  private startCPRGuidanceTimer(session: AppSession, sessionId: string) {
+    const c = this.ctx(sessionId);
+    
+    // Clear any existing guidance timer
+    if (c.state.guidanceTimer) {
+      clearTimeout(c.state.guidanceTimer);
+    }
+    
+    const guidanceMessages = [
+      "Remember to keep your hands centered on the chest, between the nipples.",
+      "Compress at least 2 inches deep. Let the chest rise completely between compressions.",
+      "Keep your shoulders directly over your hands and your arms straight.",
+      "Maintain the rhythm. Don't stop unless the person shows signs of life.",
+      "Push hard and fast. You're doing great! Keep going!",
+      "If you get tired, switch with someone else if available, but don't stop for more than 10 seconds."
+    ];
+    
+    let messageIndex = 0;
+    
+    const giveGuidance = async () => {
+      if (c.state.currentState === "compressions") {
+        const message = guidanceMessages[messageIndex % guidanceMessages.length];
+        await this.queueTTS(session, sessionId, message);
+        messageIndex++;
+        
+        // Schedule next guidance in 15-20 seconds (randomized)
+        const nextDelay = 15000 + Math.random() * 5000;
+        c.state.guidanceTimer = setTimeout(giveGuidance, nextDelay);
+      }
+    };
+    
+    // Start the first guidance after 20 seconds
+    c.state.guidanceTimer = setTimeout(giveGuidance, 20000);
+    console.log("💬 Started periodic CPR guidance reminders");
+  }
+
+  // Stop automatic hand position checking
+  private stopHandCheckTimer(sessionId: string) {
+    const c = this.ctx(sessionId);
+    if (c.state.handCheckTimer) {
+      clearTimeout(c.state.handCheckTimer);
+      c.state.handCheckTimer = undefined;
+      console.log("⏹️ Stopped automatic hand position checking");
+    }
+  }
+
+  // Stop periodic CPR guidance reminders
+  private stopCPRGuidanceTimer(sessionId: string) {
+    const c = this.ctx(sessionId);
+    if (c.state.guidanceTimer) {
+      clearTimeout(c.state.guidanceTimer);
+      c.state.guidanceTimer = undefined;
+      console.log("⏹️ Stopped periodic CPR guidance reminders");
+    }
   }
 
   private async changeBPM(session: AppSession, sessionId: string) {
@@ -467,22 +825,22 @@ class RescueApp extends AppServer {
         await this.enterSafetyCheck(session, sessionId);
         return;
       }
+      if (nlu.intent === "SHUTDOWN") {
+        await this.stopAllAudio(session);
+        this.stopMetronome(sessionId);
+        await this.queueTTS(session, sessionId, "Shutting down the CPR app.");
+        setTimeout(() => {
+          process.exit(0);
+        }, 2000);
+        return;
+      }
       if (nlu.intent === "EMERGENCY_CALLED") {
         c.state.emergencyConfirmed = true;
         await this.queueTTS(session, sessionId, "Emergency services called. Now check if the person is responsive.");
         setTimeout(() => this.enterResponsiveness(session, sessionId), 1000);
         return;
       }
-      if (nlu.intent === "CHECK_HANDS") {
-        if (c.state.currentState !== "compressions") {
-          await this.queueTTS(session, sessionId, "Starting compressions, then I’ll check hand position.");
-          await this.enterCompressions(session, sessionId);
-          setTimeout(() => this.captureHandsPhoto(session, sessionId), 300);
-        } else {
-          await this.captureHandsPhoto(session, sessionId);
-        }
-        return;
-      }
+      // CHECK_HANDS intent removed - now using automatic 3-second timer
 
       // State-specific
       switch (c.state.currentState) {
@@ -497,20 +855,34 @@ class RescueApp extends AppServer {
           } else if (nlu.intent === "HAZARD_PRESENT") {
             await this.queueTTS(session, sessionId, "Emergency! Call 911 immediately. Tell me when emergency is called.");
           } else {
-            await this.queueTTS(session, sessionId, "Is the scene safe or not?");
+            // Only ask about safety if we haven't already confirmed it
+            // Add a small delay to avoid rapid-fire questions
+            setTimeout(() => {
+              this.queueTTS(session, sessionId, "Please confirm: is the scene safe or not?");
+            }, 500);
           }
           break;
         }
         case "responsiveness_check": {
           if (nlu.intent === "RESPONSIVE_YES") {
-            await this.queueTTS(session, sessionId, "Good. Monitor them and call for help if needed.");
-            await this.enterSafetyCheck(session, sessionId);
+            await this.queueTTS(session, sessionId, "Good. Monitor them and call for help if needed. If their condition worsens, say 'start' to begin CPR.");
+            // Stay in responsiveness_check state, don't loop back to safety
           } else if (nlu.intent === "RESPONSIVE_NO") {
-            await this.queueTTS(session, sessionId, "No response detected. Starting CPR compressions now.");
+            await this.queueTTS(session, sessionId, "No response detected.");
             setTimeout(() => this.enterCompressions(session, sessionId), 800);
           } else {
-            await this.queueTTS(session, sessionId, "Did they respond or not?");
+            // Add a small delay to avoid rapid-fire questions
+            setTimeout(() => {
+              this.queueTTS(session, sessionId, "Please tell me: did they respond or not?");
+            }, 500);
           }
+          break;
+        }
+        case "cpr_guidance": {
+          if (nlu.intent === "SKIP_GUIDANCE") {
+            await this.skipToCompressions(session, sessionId);
+          }
+          // Other intents are ignored during guidance - user needs to wait or skip
           break;
         }
         case "compressions": {
@@ -601,6 +973,50 @@ class RescueApp extends AppServer {
   }
 }
 
-new RescueApp().start().catch((err) => {
+// Graceful shutdown handling
+const app = new RescueApp();
+
+// Handle process termination signals
+process.on('SIGINT', async () => {
+  console.log('\nReceived SIGINT, shutting down gracefully...');
+  await gracefulShutdown();
+});
+
+process.on('SIGTERM', async () => {
+  console.log('\nReceived SIGTERM, shutting down gracefully...');
+  await gracefulShutdown();
+});
+
+process.on('SIGUSR2', async () => {
+  console.log('\nReceived SIGUSR2 (nodemon restart), shutting down gracefully...');
+  await gracefulShutdown();
+});
+
+async function gracefulShutdown() {
+  try {
+    console.log('Stopping app server...');
+    await app.stop();
+    console.log('App stopped successfully');
+    process.exit(0);
+  } catch (error) {
+    console.error('Error during shutdown:', error);
+    process.exit(1);
+  }
+}
+
+// Handle uncaught exceptions
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught Exception:', error);
+  gracefulShutdown().then(() => process.exit(1));
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+  gracefulShutdown().then(() => process.exit(1));
+});
+
+// Start the app
+app.start().catch((err) => {
   console.error("Failed to start app:", err);
+  process.exit(1);
 });
