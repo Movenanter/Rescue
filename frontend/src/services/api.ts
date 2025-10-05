@@ -65,6 +65,32 @@ interface RecentPhotosResponse {
   count: number
 }
 
+interface SessionPhoto {
+  filename: string
+  timestamp: string
+  analysis: any
+  guidance: any
+}
+
+interface Session {
+  session_id: string
+  user_id: string
+  start_time: string
+  end_time: string
+  photos: SessionPhoto[]
+  total_photos: number
+  good_positions: number
+  poor_positions: number
+  no_cpr_detected: number
+  average_confidence: number
+}
+
+interface SessionsResponse {
+  success: boolean
+  sessions: Session[]
+  count: number
+}
+
 // API Services
 export const apiService = {
   // Health check
@@ -122,8 +148,14 @@ export const apiService = {
     return response.data
   },
 
-  // Session management endpoints (mock for now)
-  async getSessions(userId?: string) {
+  // Get all sessions with grouped photos
+  async getSessions(): Promise<SessionsResponse> {
+    const response = await apiClient.get<SessionsResponse>('/sessions')
+    return response.data
+  },
+
+  // Legacy session management endpoints (mock for now)
+  async getSessionsLegacy(userId?: string) {
     // TODO: Implement when backend session management is ready
     return []
   },

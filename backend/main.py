@@ -534,6 +534,109 @@ async def get_recent_photos(limit: int = 10):
         logger.error(f"Error getting recent photos: {e}")
         raise HTTPException(status_code=500, detail=f"Error getting recent photos: {str(e)}")
 
+@app.get("/sessions")
+async def get_sessions():
+    """Get all sessions with their photos grouped together"""
+    try:
+        import glob
+        import json
+        from collections import defaultdict
+        
+        # Get all analysis JSON files
+        json_files = glob.glob(os.path.join(PHOTOS_DIR, "*_analysis.json"))
+        
+        # Group photos by session_id
+        sessions_dict = defaultdict(lambda: {
+            "session_id": None,
+            "user_id": None,
+            "start_time": None,
+            "end_time": None,
+            "photos": [],
+            "total_photos": 0,
+            "good_positions": 0,
+            "poor_positions": 0,
+            "no_cpr_detected": 0,
+            "average_confidence": 0
+        })
+        
+        # Process each photo
+        for json_file in json_files:
+            try:
+                with open(json_file, 'r') as f:
+                    analysis_data = json.load(f)
+                
+                session_id = analysis_data.get("session_id", "unknown")
+                user_id = analysis_data.get("user_id", "unknown")
+                timestamp = analysis_data.get("timestamp")
+                analysis = analysis_data.get("analysis", {})
+                guidance = analysis_data.get("guidance", "")
+                
+                # Get corresponding image file
+                image_file = json_file.replace('_analysis.json', '.jpg')
+                if os.path.exists(image_file):
+                    photo_data = {
+                        "filename": os.path.basename(image_file),
+                        "timestamp": timestamp,
+                        "analysis": analysis,
+                        "guidance": guidance
+                    }
+                    
+                    # Initialize session data
+                    if sessions_dict[session_id]["session_id"] is None:
+                        sessions_dict[session_id]["session_id"] = session_id
+                        sessions_dict[session_id]["user_id"] = user_id
+                        sessions_dict[session_id]["start_time"] = timestamp
+                        sessions_dict[session_id]["end_time"] = timestamp
+                    
+                    # Add photo to session
+                    sessions_dict[session_id]["photos"].append(photo_data)
+                    sessions_dict[session_id]["total_photos"] += 1
+                    
+                    # Update timing
+                    if timestamp:
+                        if not sessions_dict[session_id]["start_time"] or timestamp < sessions_dict[session_id]["start_time"]:
+                            sessions_dict[session_id]["start_time"] = timestamp
+                        if not sessions_dict[session_id]["end_time"] or timestamp > sessions_dict[session_id]["end_time"]:
+                            sessions_dict[session_id]["end_time"] = timestamp
+                    
+                    # Count position types
+                    position = analysis.get("position", "uncertain")
+                    confidence = analysis.get("confidence", 0)
+                    
+                    if position == "good":
+                        sessions_dict[session_id]["good_positions"] += 1
+                    elif position in ["high", "low", "left", "right", "uncertain", "unknown"]:
+                        sessions_dict[session_id]["poor_positions"] += 1
+                    elif position == "no_cpr":
+                        sessions_dict[session_id]["no_cpr_detected"] += 1
+                    
+                    # Update average confidence
+                    current_avg = sessions_dict[session_id]["average_confidence"]
+                    total_photos = sessions_dict[session_id]["total_photos"]
+                    sessions_dict[session_id]["average_confidence"] = ((current_avg * (total_photos - 1)) + confidence) / total_photos
+                    
+            except Exception as e:
+                logger.error(f"Error reading {json_file}: {e}")
+                continue
+        
+        # Convert to list and sort by start_time (newest first)
+        sessions = list(sessions_dict.values())
+        sessions.sort(key=lambda x: x["start_time"] or "", reverse=True)
+        
+        # Sort photos within each session by timestamp (newest first)
+        for session in sessions:
+            session["photos"].sort(key=lambda x: x["timestamp"] or "", reverse=True)
+        
+        return {
+            "success": True,
+            "sessions": sessions,
+            "count": len(sessions)
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting sessions: {e}")
+        raise HTTPException(status_code=500, detail=f"Error getting sessions: {str(e)}")
+
 @app.get("/health")
 async def health_check():
     """Detailed health check"""
@@ -552,6 +655,7 @@ async def health_check():
             "/analyze-hands",
             "/upload-photo",
             "/recent-photos",
+            "/sessions",
             "/health"
         ],
         "photos_directory": PHOTOS_DIR

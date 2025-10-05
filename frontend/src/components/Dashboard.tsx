@@ -25,6 +25,8 @@ const Dashboard: React.FC = () => {
   const [backendConnected, setBackendConnected] = useState(false)
   const [recentPhotos, setRecentPhotos] = useState<any[]>([])
   const [photosLoading, setPhotosLoading] = useState(false)
+  const [sessionsData, setSessionsData] = useState<any[]>([])
+  const [sessionsLoading, setSessionsLoading] = useState(false)
   
   // Real metrics from actual sessions
   const [sessionStats, setSessionStats] = useState({
@@ -130,16 +132,17 @@ const Dashboard: React.FC = () => {
   useEffect(() => {
     if (backendConnected) {
       const loadSessions = async () => {
-        setLoading(true)
+        setSessionsLoading(true)
         try {
-          const backendSessions = await apiService.getSessions()
-          if (backendSessions.length > 0) {
-            setSessions(backendSessions)
+          const sessionsResponse = await apiService.getSessions()
+          if (sessionsResponse.success && sessionsResponse.sessions.length > 0) {
+            setSessionsData(sessionsResponse.sessions)
+            console.log('Loaded sessions:', sessionsResponse.sessions)
           }
         } catch (error) {
           console.warn('Failed to load sessions from backend:', error)
         } finally {
-          setLoading(false)
+          setSessionsLoading(false)
         }
       }
       

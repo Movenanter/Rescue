@@ -39,7 +39,7 @@ const SAVE_DIR = path.resolve(process.cwd(), process.env.SAVE_DIR || "hands-posi
 
 // ---------- Types & state ----------
 type BPM = 100 | 110 | 120;
-type AppState = "initialization" | "safety_check" | "responsiveness_check" | "compressions" | "settings";
+type AppState = "initialization" | "safety_check" | "responsiveness_check" | "cpr_guidance" | "compressions" | "settings";
 
 type IntentName =
   | "START"
@@ -52,6 +52,7 @@ type IntentName =
   | "CHANGE_BPM"
   | "OPEN_SETTINGS"
   | "BACK_TO_COMPRESSIONS"
+  | "SKIP_GUIDANCE"
   | "SHUTDOWN"
   | "UNKNOWN";
 
@@ -70,6 +71,7 @@ interface RescueSessionState {
   speechGuardUntil?: number;       // voice prompts only (NEVER pauses beats)
   metronomeTimer?: NodeJS.Timeout; // setTimeout handle
   handCheckTimer?: NodeJS.Timeout; // timer for automatic hand position checks
+  guidanceTimer?: NodeJS.Timeout;  // timer for periodic CPR guidance reminders
 }
 
 interface SessionContext {
@@ -106,8 +108,8 @@ const INTENT_SYSTEM_PROMPT = `
 You are an intent classifier for a voice-only CPR coaching app.
 Return ONLY JSON with key "intent" (and optional "meta").
 Valid intent values:
-START, CONFIRM_SAFETY, HAZARD_PRESENT, EMERGENCY_CALLED, RESPONSIVE_YES, RESPONSIVE_NO,
-CHECK_HANDS, CHANGE_BPM, OPEN_SETTINGS, BACK_TO_COMPRESSIONS, SHUTDOWN, UNKNOWN
+START, CONFIRM_SAFETY, HAZARD_PRESENT, EMERGENCY_CALLED, RESPONSIVE_YES, RESPONSIVE_NO, 
+CHECK_HANDS, CHANGE_BPM, OPEN_SETTINGS, BACK_TO_COMPRESSIONS, SKIP_GUIDANCE, SHUTDOWN, UNKNOWN
 
 Classify by meaning and intent, not keywords.
 If the user is answering whether the person responded, interpret short answers like "yes", "no" accordingly.
@@ -182,6 +184,7 @@ function classifyIntentHeuristic(text: string, state: AppState): IntentResult {
     return { intent: "CHANGE_BPM" };
   if (/\b(settings|open settings|configure)\b/.test(t)) return { intent: "OPEN_SETTINGS" };
   if (/\b(back|resume compressions|go back)\b/.test(t)) return { intent: "BACK_TO_COMPRESSIONS" };
+  if (/\b(skip|skip guidance|skip instructions|start compressions|start now|go ahead|begin|ready)\b/.test(t)) return { intent: "SKIP_GUIDANCE" };
   if (/\b(shutdown|quit|exit|stop app|close app|turn off)\b/.test(t)) return { intent: "SHUTDOWN" };
 
   return { intent: "UNKNOWN" };
@@ -289,8 +292,9 @@ class RescueApp extends AppServer {
       clearTimeout(c.state.metronomeTimer as unknown as NodeJS.Timeout);
       c.state.metronomeTimer = undefined;
     }
-    // Also stop hand check timer when stopping metronome
+    // Also stop hand check timer and guidance timer when stopping metronome
     this.stopHandCheckTimer(sessionId);
+    this.stopCPRGuidanceTimer(sessionId);
   }
 
   // ---- Photo capture + optional local save to SAVE_DIR ----
@@ -448,6 +452,16 @@ class RescueApp extends AppServer {
       if (!response.ok) {
         const errorText = await response.text();
         console.error(`🚨 Gemini API failed: ${response.status} ${response.statusText}`, errorText);
+        
+        // Handle quota exceeded error specifically
+        if (response.status === 429) {
+          console.warn("⚠️ Gemini API quota exceeded - falling back to basic analysis");
+          return {
+            position: "uncertain",
+            confidence: 0.5
+          };
+        }
+        
         throw new Error(`Gemini API failed: ${response.statusText}`);
       }
 
@@ -567,14 +581,129 @@ class RescueApp extends AppServer {
   }
   private async enterCompressions(session: AppSession, sessionId: string) {
     const c = this.ctx(sessionId);
-    c.state.currentState = "compressions";
-    c.state.speechGuardUntil = Date.now() + 2200; // info only
+    c.state.currentState = "cpr_guidance";
+    
+    // Step-by-step CPR guidance
+    await this.guideThroughCPRProcess(session, sessionId);
+  }
+
+  private async guideThroughCPRProcess(session: AppSession, sessionId: string) {
+    const c = this.ctx(sessionId);
+    
+    // Check if we're still in guidance state before each step
+    if (c.state.currentState !== "cpr_guidance") {
+      console.log("⚠️ Guidance interrupted - state changed to:", c.state.currentState);
+      return;
+    }
+    
+    // Introduction with skip option
     await session.audio.speak(
-      `Starting compressions at ${c.state.metronomeBPM} beats per minute.`,
+      "I'll guide you through the CPR process step by step. You can skip if needed.",
       { voice_settings: { speed: TTS_SPEED } }
     );
-    setTimeout(() => this.startMetronome(session, sessionId), 450);
-    setTimeout(() => this.startHandCheckTimer(session, sessionId), 1000); // Start hand checking after 1 second
+    await this.delay(3000);
+    
+    // Step 1: Position the person
+    await session.audio.speak(
+      "Step 1: Position the person. Lay them on their back on a firm, flat surface. Remove any clothing from their chest.",
+      { voice_settings: { speed: TTS_SPEED } }
+    );
+    await this.delay(3000); // Wait 3 seconds between instructions
+
+    // Check state before continuing
+    if (c.state.currentState !== "cpr_guidance") return;
+
+    // Step 2: Hand positioning
+    await session.audio.speak(
+      "Step 2: Position your hands. Place the heel of one hand in the center of the chest, between the nipples. Place your other hand on top and interlock your fingers.",
+      { voice_settings: { speed: TTS_SPEED } }
+    );
+    await this.delay(4000);
+
+    // Check state before continuing
+    if (c.state.currentState !== "cpr_guidance") return;
+
+    // Step 3: Body position
+    await session.audio.speak(
+      "Step 3: Position your body. Kneel beside the person. Keep your shoulders directly over your hands and your arms straight.",
+      { voice_settings: { speed: TTS_SPEED } }
+    );
+    await this.delay(3000);
+
+    // Check state before continuing
+    if (c.state.currentState !== "cpr_guidance") return;
+
+    // Step 4: Compression technique
+    await session.audio.speak(
+      "Step 4: Compression technique. Press down hard and fast. Compress the chest at least 2 inches deep. Let the chest rise completely between compressions.",
+      { voice_settings: { speed: TTS_SPEED } }
+    );
+    await this.delay(4000);
+
+    // Check state before continuing
+    if (c.state.currentState !== "cpr_guidance") return;
+
+    // Step 5: Rate and rhythm
+    await session.audio.speak(
+      `Step 5: Rate and rhythm. Compress at a rate of ${c.state.metronomeBPM} compressions per minute. That's about 2 compressions per second. The metronome will help you maintain the correct rhythm.`,
+      { voice_settings: { speed: TTS_SPEED } }
+    );
+    await this.delay(5000);
+
+    // Check state before continuing
+    if (c.state.currentState !== "cpr_guidance") return;
+
+    // Step 6: Duration and rescue breaths
+    await session.audio.speak(
+      "Step 6: Continue compressions. Give 30 compressions, then 2 rescue breaths if you're trained. If not trained in rescue breaths, continue with compressions only. Continue until help arrives or the person shows signs of life.",
+      { voice_settings: { speed: TTS_SPEED } }
+    );
+    await this.delay(5000);
+
+    // Final instruction before starting
+    await session.audio.speak(
+      "You're ready to begin CPR. I'll start the metronome now to help you maintain the correct rhythm. Remember to keep your hands centered on the chest and compress deeply.",
+      { voice_settings: { speed: TTS_SPEED } }
+    );
+    await this.delay(3000);
+
+    // Set state to compressions and start the metronome, hand checking, and guidance
+    c.state.currentState = "compressions";
+    this.startMetronome(session, sessionId);
+    setTimeout(() => this.startHandCheckTimer(session, sessionId), 1000);
+    setTimeout(() => this.startCPRGuidanceTimer(session, sessionId), 2000);
+  }
+
+  private delay(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  private async skipToCompressions(session: AppSession, sessionId: string) {
+    const c = this.ctx(sessionId);
+    
+    // Stop ALL ongoing processes immediately
+    if (c.state.guidanceTimer) {
+      clearTimeout(c.state.guidanceTimer);
+      c.state.guidanceTimer = undefined;
+    }
+    if (c.state.handCheckTimer) {
+      clearTimeout(c.state.handCheckTimer);
+      c.state.handCheckTimer = undefined;
+    }
+    
+    // Set state to compressions and start everything
+    c.state.currentState = "compressions";
+    
+    await session.audio.speak(
+      "Skipping guidance. Starting compressions now.",
+      { voice_settings: { speed: TTS_SPEED } }
+    );
+    await this.delay(1500);
+    
+    // Start the metronome, hand checking, and guidance
+    this.startMetronome(session, sessionId);
+    setTimeout(() => this.startHandCheckTimer(session, sessionId), 1000);
+    setTimeout(() => this.startCPRGuidanceTimer(session, sessionId), 2000);
   }
   private async enterSettings(session: AppSession, sessionId: string) {
     const c = this.ctx(sessionId);
@@ -595,15 +724,52 @@ class RescueApp extends AppServer {
     // Start new timer
     const checkHands = async () => {
       if (c.state.currentState === "compressions") {
-        await this.checkHandPosition(session, sessionId);
-        // Schedule next check in 3 seconds
-        c.state.handCheckTimer = setTimeout(checkHands, 3000);
+        await this.captureHandsPhoto(session, sessionId);
+        // Schedule next check in 5 seconds (frequent feedback for better training)
+        c.state.handCheckTimer = setTimeout(checkHands, 5000);
       }
     };
     
     // Start the first check
-    c.state.handCheckTimer = setTimeout(checkHands, 3000);
-    console.log("🔄 Started automatic hand position checking every 3 seconds");
+    c.state.handCheckTimer = setTimeout(checkHands, 5000); // Start after 5 seconds
+    console.log("🔄 Started automatic hand position checking every 5 seconds");
+  }
+
+  // Add periodic CPR guidance reminders during compressions
+  private startCPRGuidanceTimer(session: AppSession, sessionId: string) {
+    const c = this.ctx(sessionId);
+    
+    // Clear any existing guidance timer
+    if (c.state.guidanceTimer) {
+      clearTimeout(c.state.guidanceTimer);
+    }
+    
+    const guidanceMessages = [
+      "Remember to keep your hands centered on the chest, between the nipples.",
+      "Compress at least 2 inches deep. Let the chest rise completely between compressions.",
+      "Keep your shoulders directly over your hands and your arms straight.",
+      "Maintain the rhythm. Don't stop unless the person shows signs of life.",
+      "Push hard and fast. You're doing great! Keep going!",
+      "If you get tired, switch with someone else if available, but don't stop for more than 10 seconds."
+    ];
+    
+    let messageIndex = 0;
+    
+    const giveGuidance = async () => {
+      if (c.state.currentState === "compressions") {
+        const message = guidanceMessages[messageIndex % guidanceMessages.length];
+        await this.queueTTS(session, sessionId, message);
+        messageIndex++;
+        
+        // Schedule next guidance in 15-20 seconds (randomized)
+        const nextDelay = 15000 + Math.random() * 5000;
+        c.state.guidanceTimer = setTimeout(giveGuidance, nextDelay);
+      }
+    };
+    
+    // Start the first guidance after 20 seconds
+    c.state.guidanceTimer = setTimeout(giveGuidance, 20000);
+    console.log("💬 Started periodic CPR guidance reminders");
   }
 
   // Stop automatic hand position checking
@@ -613,6 +779,16 @@ class RescueApp extends AppServer {
       clearTimeout(c.state.handCheckTimer);
       c.state.handCheckTimer = undefined;
       console.log("⏹️ Stopped automatic hand position checking");
+    }
+  }
+
+  // Stop periodic CPR guidance reminders
+  private stopCPRGuidanceTimer(sessionId: string) {
+    const c = this.ctx(sessionId);
+    if (c.state.guidanceTimer) {
+      clearTimeout(c.state.guidanceTimer);
+      c.state.guidanceTimer = undefined;
+      console.log("⏹️ Stopped periodic CPR guidance reminders");
     }
   }
 
@@ -692,7 +868,7 @@ class RescueApp extends AppServer {
             await this.queueTTS(session, sessionId, "Good. Monitor them and call for help if needed. If their condition worsens, say 'start' to begin CPR.");
             // Stay in responsiveness_check state, don't loop back to safety
           } else if (nlu.intent === "RESPONSIVE_NO") {
-            await this.queueTTS(session, sessionId, "No response detected. Starting CPR compressions now.");
+            await this.queueTTS(session, sessionId, "No response detected.");
             setTimeout(() => this.enterCompressions(session, sessionId), 800);
           } else {
             // Add a small delay to avoid rapid-fire questions
@@ -700,6 +876,13 @@ class RescueApp extends AppServer {
               this.queueTTS(session, sessionId, "Please tell me: did they respond or not?");
             }, 500);
           }
+          break;
+        }
+        case "cpr_guidance": {
+          if (nlu.intent === "SKIP_GUIDANCE") {
+            await this.skipToCompressions(session, sessionId);
+          }
+          // Other intents are ignored during guidance - user needs to wait or skip
           break;
         }
         case "compressions": {
