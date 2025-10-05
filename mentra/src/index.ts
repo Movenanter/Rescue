@@ -26,8 +26,9 @@ const PREWARM = (process.env.PREWARM || "1") === "1"; // warm decoder to avoid f
 // ---------- TTS config ----------
 const TTS_SPEED = Math.max(0.5, Math.min(2.0, Number(process.env.TTS_SPEED || "1.1"))); // default 1.1x
 
-// ---------- Gemini 2.5 (optional NLU) ----------
+// ---------- Gemini (for hand position analysis) ----------
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
+// Using gemini-2.5-flash: latest and fastest model for speed-critical tasks
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 const GEMINI_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
   GEMINI_MODEL
@@ -411,7 +412,7 @@ class RescueApp extends AppServer {
       const requestBody = {
         contents: [{
           parts: [{
-            text: "Analyze this image carefully. Are hands actually placed on a person's chest for CPR compressions? If hands are in the air, not touching anyone, or not positioned for CPR, respond 'no_cpr'. If hands are on someone's chest doing CPR, determine position: 'good' (centered), 'high' (too high), 'low' (too low), 'left' (too far left), 'right' (too far right). If you cannot clearly see the scene, respond 'uncertain'. Respond with exactly one word only."
+            text: "CPR hand position analysis. Look for hands on chest center. Respond with ONE word only:\nno_cpr|good|high|low|left|right|uncertain"
           }, {
             inline_data: {
               mime_type: mimeType,
@@ -420,8 +421,13 @@ class RescueApp extends AppServer {
           }]
         }],
         generationConfig: {
-          temperature: 0.1,
-          maxOutputTokens: 15
+          temperature: 0.0,
+          maxOutputTokens: 5,
+          topP: 0.1,
+          topK: 1,
+          // Additional optimizations for Flash model speed
+          stopSequences: [], // No stop sequences for faster processing
+          candidateCount: 1  // Only generate one response for speed
         }
       };
 
@@ -432,6 +438,8 @@ class RescueApp extends AppServer {
           "Content-Type": "application/json",
         },
         body: JSON.stringify(requestBody),
+        // Add timeout for faster failure detection
+        signal: AbortSignal.timeout(10000) // 10 second timeout
       });
 
       if (!response.ok) {
@@ -442,17 +450,23 @@ class RescueApp extends AppServer {
       const endTime = Date.now();
       const duration = endTime - startTime;
       
-      console.log(`Gemini analysis completed in ${duration}ms`);
+      console.log(`⚡ Gemini analysis completed in ${duration}ms`);
       
-      const text = result.candidates?.[0]?.content?.parts?.[0]?.text?.toLowerCase().trim();
+      if (duration > 3000) {
+        console.warn(`⚠️ Slow Gemini response: ${duration}ms (consider optimizing)`);
+      }
+      
+      const rawText = result.candidates?.[0]?.content?.parts?.[0]?.text?.toLowerCase().trim();
+      
+      // Extract the first valid position from response (in case of extra text)
       const validPositions = ["good", "high", "low", "left", "right", "uncertain", "no_cpr"];
+      const position = validPositions.find(pos => rawText.includes(pos)) || "uncertain";
       
-      console.log(`Gemini raw response: "${text}"`);
+      console.log(`Gemini raw response: "${rawText}" -> parsed: "${position}"`);
       
-      const position = validPositions.includes(text) ? text : "uncertain";
-      const confidence = position === "uncertain" ? 0.3 : (position === "no_cpr" ? 0.9 : 0.8);
-      
-      console.log(`Gemini final position: "${position}" (confidence: ${confidence})`);
+      // High confidence for clear responses, lower for uncertain
+      const confidence = position === "uncertain" ? 0.3 : 
+                        position === "no_cpr" ? 0.95 : 0.9;
       
       return { position, confidence };
     } catch (error) {

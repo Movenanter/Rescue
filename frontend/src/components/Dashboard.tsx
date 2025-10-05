@@ -26,10 +26,89 @@ const Dashboard: React.FC = () => {
   const [recentPhotos, setRecentPhotos] = useState<any[]>([])
   const [photosLoading, setPhotosLoading] = useState(false)
   
+  // Real metrics from actual sessions
+  const [sessionStats, setSessionStats] = useState({
+    totalPhotos: 0,
+    goodPositions: 0,
+    poorPositions: 0,
+    noCprDetected: 0,
+    averageResponseTime: 0,
+    lastSessionTime: null as string | null
+  })
+  
   const filteredSessions = useMemo(() => {
     if (selectedTrialType === 'all') return sessions
     return sessions.filter(session => session.trialType === selectedTrialType)
   }, [selectedTrialType, sessions])
+
+  // Calculate real statistics from photo data
+  const calculateRealStats = (photos: any[]) => {
+    console.log('📊 Calculating stats from photos:', photos) // Debug log
+    
+    const totalPhotos = photos.length
+    
+    // Debug each photo's analysis data
+    photos.forEach((photo, index) => {
+      console.log(`Photo ${index}:`, {
+        analysis: photo.analysis,
+        guidance: photo.guidance,
+        position: photo.analysis?.position,
+        source: photo.analysis?.source
+      })
+    })
+    
+    const goodPositions = photos.filter(p => {
+      const position = p.analysis?.position
+      console.log(`Checking position "${position}" for good:`, position === 'good')
+      return position === 'good'
+    }).length
+    
+    const poorPositions = photos.filter(p => {
+      const position = p.analysis?.position
+      const isPoor = ['high', 'low', 'left', 'right', 'uncertain', 'unknown'].includes(position)
+      console.log(`Checking position "${position}" for poor:`, isPoor)
+      return isPoor
+    }).length
+    
+    const noCprDetected = photos.filter(p => {
+      const position = p.analysis?.position
+      const isNoCpr = position === 'no_cpr'
+      console.log(`Checking position "${position}" for no_cpr:`, isNoCpr)
+      return isNoCpr
+    }).length
+    
+    // Also check guidance text for "No CPR detected" as fallback
+    const noCprFromGuidance = photos.filter(p => {
+      const guidance = p.guidance?.instruction || p.guidance?.all_feedback?.[0] || ''
+      const hasNoCpr = guidance.toLowerCase().includes('no cpr detected') || 
+                      guidance.toLowerCase().includes('no cpr in progress')
+      console.log(`Checking guidance "${guidance}" for no CPR:`, hasNoCpr)
+      return hasNoCpr
+    }).length
+    
+    // Use the higher count between position and guidance
+    const finalNoCprCount = Math.max(noCprDetected, noCprFromGuidance)
+    
+    console.log('📈 Final stats:', {
+      totalPhotos,
+      goodPositions,
+      poorPositions,
+      noCprDetected: finalNoCprCount,
+      noCprFromPosition: noCprDetected,
+      noCprFromGuidance: noCprFromGuidance
+    })
+    
+    const lastSessionTime = photos.length > 0 ? photos[0].timestamp : null
+    
+    return {
+      totalPhotos,
+      goodPositions,
+      poorPositions,
+      noCprDetected: finalNoCprCount,
+      averageResponseTime: 0, // Simplified for now
+      lastSessionTime
+    }
+  }
 
   // Check backend connection on component mount
   useEffect(() => {
@@ -74,8 +153,12 @@ const Dashboard: React.FC = () => {
       const loadRecentPhotos = async () => {
         setPhotosLoading(true)
         try {
-          const photosData = await apiService.getRecentPhotos(5)
+          const photosData = await apiService.getRecentPhotos(10) // Load more for better stats
           setRecentPhotos(photosData.photos)
+          
+          // Calculate real statistics from the photos
+          const realStats = calculateRealStats(photosData.photos)
+          setSessionStats(realStats)
         } catch (error) {
           console.warn('Failed to load recent photos:', error)
         } finally {
@@ -130,140 +213,63 @@ const Dashboard: React.FC = () => {
           {/* Main Content */}
           <div className="flex-1 min-w-0">
 
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
-              <div className="bg-white/70 backdrop-blur-sm rounded-2xl p-6 border border-primary-200 shadow-lg">
-                <div className="flex items-center justify-between mb-4">
-                  <Activity className="w-6 h-6 text-primary-700" />
-                  <span className="text-2xl font-bold">{filteredSessions.length}</span>
-                </div>
-                <p className="text-sm text-primary-600">
-                  {selectedTrialType === 'all' ? 'Total Sessions' : 
-                   selectedTrialType === 'practice' ? 'Practice Sessions' : 'Real Trials'}
-                </p>
-              </div>
 
-              <div className="bg-white/70 backdrop-blur-sm rounded-2xl p-6 border border-primary-200 shadow-lg">
-                <div className="flex items-center justify-between mb-4">
-                  <Award className="w-6 h-6 text-primary-700" />
-                  <span className="text-2xl font-bold">
-                    {filteredSessions.length > 0 
-                      ? Math.round(filteredSessions.reduce((sum, s) => sum + s.score, 0) / filteredSessions.length)
-                      : 0}%
-                  </span>
-                </div>
-                <p className="text-sm text-primary-600">Average Score</p>
-              </div>
-
-              <div className="bg-white/70 backdrop-blur-sm rounded-2xl p-6 border border-primary-200 shadow-lg">
-                <div className="flex items-center justify-between mb-4">
-                  <Clock className="w-6 h-6 text-primary-700" />
-                  <span className="text-2xl font-bold">
-                    {filteredSessions.length > 0 
-                      ? Math.round(filteredSessions.reduce((sum, s) => {
-                          const [mins, secs] = s.duration.split(':').map(Number)
-                          return sum + mins * 60 + secs
-                        }, 0) / 3600 * 10) / 10
-                      : 0}h
-                  </span>
-                </div>
-                <p className="text-sm text-primary-600">Total Training Time</p>
-              </div>
-
-              <div className="bg-white/70 backdrop-blur-sm rounded-2xl p-6 border border-primary-200 shadow-lg">
-                <div className="flex items-center justify-between mb-4">
-                  <TrendingUp className="w-6 h-6 text-primary-700" />
-                  <span className="text-2xl font-bold">
-                    {filteredSessions.filter(s => s.passed).length}/{filteredSessions.length}
-                  </span>
-                </div>
-                <p className="text-sm text-primary-600">Pass Rate</p>
-              </div>
-            </div>
-
-            <div className="bg-white/70 backdrop-blur-sm rounded-2xl p-6 border border-primary-200 shadow-lg">
-              <div className="flex items-center justify-between mb-4">
-                <h2 className="text-xl font-semibold flex items-center space-x-2">
-                  <Calendar className="w-5 h-5 text-primary-700" />
-                  <span>
-                    {selectedTrialType === 'all' ? 'Recent Sessions' :
-                     selectedTrialType === 'practice' ? 'Practice Sessions' : 'Real Trials'}
-                  </span>
-                </h2>
-                <button
-                  onClick={() => navigate('/training')}
-                  className="text-sm text-primary-600 hover:text-primary-800 font-medium"
-                >
-                  Start New Session
-                </button>
-              </div>
-              
-              <div className="space-y-3">
-                {filteredSessions.length === 0 ? (
-                  <div className="text-center py-8 text-primary-600">
-                    <Calendar className="w-12 h-12 mx-auto mb-3 opacity-50" />
-                    <p>No {selectedTrialType === 'all' ? 'sessions' : 
-                             selectedTrialType === 'practice' ? 'practice sessions' : 'real trials'} found</p>
-                  </div>
-                ) : (
-                  filteredSessions.slice(0, 5).map((session) => (
-                    <div
-                      key={session.id}
-                      onClick={() => navigate(`/report/session-001`)}
-                      className="p-4 bg-white/50 backdrop-blur-sm rounded-lg border border-primary-200 shadow-md hover:border-primary-300 hover:shadow-lg cursor-pointer transition-all"
-                    >
-                      <div className="flex items-center justify-between">
-                        <div className="flex-1">
-                          <div className="flex items-center space-x-3 mb-2">
-                            <FileText className="w-4 h-4 text-primary-600" />
-                            <span className="text-sm font-medium">
-                              {session.date.toLocaleDateString('en-US', { 
-                                month: 'short', 
-                                day: 'numeric',
-                                hour: '2-digit',
-                                minute: '2-digit'
-                              })}
-                            </span>
-                            <span className={`text-xs px-2 py-1 rounded-full ${
-                              session.trialType === 'practice' 
-                                ? 'bg-blue-100 text-blue-700' 
-                                : 'bg-red-100 text-red-700'
-                            }`}>
-                              {session.trialType === 'practice' ? 'Practice' : 'Real Trial'}
-                            </span>
-                          </div>
-                          <div className="flex items-center space-x-4 text-xs">
-                            <span className="text-primary-600">Duration: {session.duration}</span>
-                            <span className={`font-medium ${session.score >= 70 ? 'text-green-600' : 'text-yellow-600'}`}>
-                              Score: {session.score}%
-                            </span>
-                            {session.passed && (
-                              <span className="px-2 py-1 bg-green-100 text-green-700 rounded-full">
-                                Passed
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                        <ChevronRight className="w-5 h-5 text-primary-500" />
-                      </div>
-                    </div>
-                  ))
-                )}
-              </div>
-            </div>
 
             {/* Recent Photos from Mentra Glasses */}
             {backendConnected && (
-              <div className="bg-white/70 backdrop-blur-sm rounded-2xl p-6 border border-primary-200 shadow-lg mb-8">
-                <div className="flex items-center justify-between mb-4">
-                  <h2 className="text-xl font-semibold flex items-center space-x-2">
-                    <Camera className="w-5 h-5 text-primary-700" />
-                    <span>Recent Analysis from Mentra Glasses</span>
-                    {photosLoading && <Loader2 className="w-4 h-4 animate-spin text-primary-600" />}
-                  </h2>
-                  <div className="text-sm text-primary-600">
-                    {recentPhotos.length} photo{recentPhotos.length !== 1 ? 's' : ''} analyzed
+              <>
+                {/* Real Training Statistics */}
+                <div className="bg-white/70 backdrop-blur-sm rounded-2xl p-6 border border-primary-200 shadow-lg mb-6">
+                  <div className="flex items-center space-x-3 mb-4">
+                    <TrendingUp className="w-6 h-6 text-primary-600" />
+                    <h2 className="text-xl font-semibold text-primary-800">Real Training Performance</h2>
                   </div>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                    <div className="text-center">
+                      <div className="text-2xl font-bold text-primary-700">{sessionStats.totalPhotos}</div>
+                      <div className="text-sm text-primary-600">Photos Analyzed</div>
+                    </div>
+                    <div className="text-center">
+                      <div className="text-2xl font-bold text-green-600">{sessionStats.goodPositions}</div>
+                      <div className="text-sm text-primary-600">Good Positions</div>
+                    </div>
+                    <div className="text-center">
+                      <div className="text-2xl font-bold text-orange-600">{sessionStats.poorPositions}</div>
+                      <div className="text-sm text-primary-600">Need Improvement</div>
+                    </div>
+                    <div className="text-center">
+                      <div className="text-2xl font-bold text-gray-600">{sessionStats.noCprDetected}</div>
+                      <div className="text-sm text-primary-600">No CPR Detected</div>
+                    </div>
+                  </div>
+                  {sessionStats.totalPhotos > 0 && (
+                    <div className="mt-4 pt-4 border-t border-primary-200">
+                      <div className="flex justify-between items-center text-sm">
+                        <span className="text-primary-600">
+                          Success Rate: {Math.round((sessionStats.goodPositions / sessionStats.totalPhotos) * 100)}%
+                        </span>
+                        {sessionStats.lastSessionTime && (
+                          <span className="text-primary-500">
+                            Last Session: {new Date(sessionStats.lastSessionTime).toLocaleTimeString()}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  )}
                 </div>
+
+                {/* Recent Analysis */}
+                <div className="bg-white/70 backdrop-blur-sm rounded-2xl p-6 border border-primary-200 shadow-lg mb-8">
+                  <div className="flex items-center justify-between mb-4">
+                    <h2 className="text-xl font-semibold flex items-center space-x-2">
+                      <Camera className="w-5 h-5 text-primary-700" />
+                      <span>Recent Analysis from Mentra Glasses</span>
+                      {photosLoading && <Loader2 className="w-4 h-4 animate-spin text-primary-600" />}
+                    </h2>
+                    <div className="text-sm text-primary-600">
+                      {recentPhotos.length} photo{recentPhotos.length !== 1 ? 's' : ''} analyzed
+                    </div>
+                  </div>
                 
                 <div className="space-y-3">
                   {recentPhotos.length === 0 ? (
@@ -341,35 +347,9 @@ const Dashboard: React.FC = () => {
                   )}
                 </div>
               </div>
+              </>
             )}
 
-            <div className="mt-8 bg-white/60 backdrop-blur-sm border border-primary-200 rounded-2xl p-6 shadow-lg">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h3 className="text-xl font-semibold mb-2">Ready for your next training session?</h3>
-                  <p className="text-primary-600">
-                    {selectedTrialType === 'all' 
-                      ? 'Practice makes perfect. Continue improving your CPR skills.'
-                      : selectedTrialType === 'practice'
-                      ? 'Practice sessions help you improve without pressure.'
-                      : 'Real trials test your skills under certification conditions.'}
-                  </p>
-                </div>
-                <button
-                  onClick={() => navigate('/training')}
-                  className={`px-6 py-3 rounded-lg font-medium transition-colors shadow-lg ${
-                    selectedTrialType === 'practice' 
-                      ? 'bg-blue-500 text-white hover:bg-blue-600'
-                      : selectedTrialType === 'real'
-                      ? 'bg-red-500 text-white hover:bg-red-600'
-                      : 'bg-primary-600 text-white hover:bg-primary-700'
-                  }`}
-                >
-                  Start {selectedTrialType === 'practice' ? 'Practice' : 
-                         selectedTrialType === 'real' ? 'Real Trial' : 'Training'}
-                </button>
-              </div>
-            </div>
           </div>
         </div>
       </div>
